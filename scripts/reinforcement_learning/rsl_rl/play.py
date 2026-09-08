@@ -61,17 +61,13 @@ from rl_utils import camera_follow
 """Check for minimum supported RSL-RL version."""
 
 import importlib.metadata as metadata
-import platform
 from packaging import version
 
 # check minimum supported rsl-rl version
-RSL_RL_VERSION = "3.0.1"
+RSL_RL_VERSION = "5.0.1"
 installed_version = metadata.version("rsl-rl-lib")
 if version.parse(installed_version) < version.parse(RSL_RL_VERSION):
-    if platform.system() == "Windows":
-        cmd = [r".\isaaclab.bat", "-p", "-m", "pip", "install", f"rsl-rl-lib=={RSL_RL_VERSION}"]
-    else:
-        cmd = ["./isaaclab.sh", "-p", "-m", "pip", "install", f"rsl-rl-lib=={RSL_RL_VERSION}"]
+    cmd = [sys.executable, "-m", "pip", "install", f"rsl-rl-lib=={RSL_RL_VERSION}"]
     print(
         f"Please install the correct version of RSL-RL.\nExisting version is: '{installed_version}'"
         f" and required version is: '{RSL_RL_VERSION}'.\nTo install the correct version, run:"
@@ -109,7 +105,6 @@ from isaaclab_rl.rsl_rl import (
     RslRlVecEnvWrapper,
     export_policy_as_jit,
     export_policy_as_onnx,
-    handle_deprecated_rsl_rl_cfg,
 )
 from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
@@ -184,8 +179,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     runner_class_name = getattr(agent_cfg, "class_name", "OnPolicyRunner")
     is_custom_runner = runner_class_name not in ("OnPolicyRunner", "DistillationRunner")
-    # handle deprecated configurations (convert old policy format to new actor/critic format)
-    agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, installed_version)
 
     # set the environment seed
     # note: certain randomizations occur in the environment initialization so we set the seed here
@@ -264,6 +257,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # load previously trained model
     # convert config to dict and create runner
     train_cfg = agent_cfg.to_dict()
+    if version.parse(installed_version) >= version.parse("5.0.0"):
+        train_cfg = cli_args.convert_rsl_rl_cfg_dict(train_cfg)
     runner_class = resolve_callable(runner_class_name) if is_custom_runner else OnPolicyRunner
     ppo_runner = runner_class(env, train_cfg, log_dir=None, device=agent_cfg.device)
     ppo_runner.load(resume_path)

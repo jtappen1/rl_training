@@ -28,25 +28,48 @@ We've released the following tutorials for training and deploying a reinforcemen
 Everyone is welcome to contribute to this repo. If you discover a bug or optimize our training config, just submit a pull request and we will look into it.
 ## Installation
 
-- Install Isaac Lab by following the [installation guide](https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html). We recommend using the conda installation as it simplifies calling Python scripts from the terminal.
+- Install **Isaac Sim 5.1.0 and Isaac Lab 2.3.2 with Python 3.11** using the [installation guide](https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html). These are the versions tested with this repository; select these versions when following the guide. The commands below assume Linux and Bash with an activated Isaac Lab Conda environment.
 
 - Clone this repository separately from the Isaac Lab installation (i.e. outside the `IsaacLab` directory):
 
   ```bash
   git clone --recurse-submodules https://github.com/DeepRoboticsLab/rl_training.git
+  cd rl_training
+  # Also repairs an existing clone made without --recurse-submodules.
+  git submodule update --init --recursive
   ```
 
-- Using a python interpreter that has Isaac Lab installed, install the library
+- Activate your Isaac Lab environment (replace `deep-robotics-humanoid` with your environment name), then install the library. This also installs **RSL-RL 5.0.1** and **PyBullet 3.2.7**, required by DR02 AMP training.
 
   ```bash
+  conda activate deep-robotics-humanoid
   python -m pip install -e source/rl_training
   ```
+
+- Configure the environment's C++ runtime before launching Isaac Sim:
+
+  ```bash
+  python scripts/tools/setup_conda_runtime.py
+  conda deactivate
+  conda activate deep-robotics-humanoid
+  ```
+
+  The script checks that Conda's `libstdc++.so.6` provides `CXXABI_1.3.15` and installs activation/deactivation hooks in that environment. This prevents Isaac Sim from loading an older system runtime that breaks Conda's ICU/SQLite imports. It preserves any existing `LD_PRELOAD` value and restores it on deactivation. Re-running the script is safe. If it reports an outdated or missing runtime, run `conda install -c conda-forge "libstdcxx-ng>=15"`, then retry the script. System libraries are unchanged.
 
 - Verify that the extension is correctly installed by running the following command to print all the available environments in the extension:
 
   ```bash
   python scripts/tools/list_envs.py
   ```
+
+- Verify DR02 with a short training run before starting a full run:
+
+  ```bash
+  python scripts/reinforcement_learning/rsl_rl/train.py \
+    --task=Amp-Flat-Deeprobotics-DR02-v0 --headless --num_envs=16 --max_iterations=1
+  ```
+
+  It should complete one learning iteration and save `model_0.pt` under `logs/rsl_rl/dr02_amp/<run>/`.
 
 <details>
 
@@ -177,6 +200,14 @@ python scripts/tools/compare_runs.py \
 ```
 
 ## Troubleshooting
+
+### DR02 startup errors
+
+- **`CXXABI_1.3.15 not found`, `omni.kit has no attribute test`, or `cannot import name tests`:** the latter errors can cascade from the C++ runtime failure. Run `python scripts/tools/setup_conda_runtime.py` in your activated Conda environment, then deactivate/reactivate it and restart training. An already running Python process cannot pick up the new runtime.
+- **Missing `DR02-pro.urdf`:** run `git submodule update --init --recursive` from the repository root.
+- **Missing `pybullet_utils` or incompatible RSL-RL:** re-run `python -m pip install -e source/rl_training` in the environment used for training. The package declares the tested versions. The training scripts use the repository's config converter for RSL-RL 5, so the missing Isaac Lab `handle_deprecated_rsl_rl_cfg` helper is not required.
+
+Some startup warnings remain with the tested setup. A missing viewport is expected in headless mode. The DR02 URDF contains fixed sensor links without inertia; the importer assigns small inertias and adjusts joint axes. These messages do not prevent training, but changing the robot's inertial properties should be based on measured model data. CPU powersave and GPU peer-to-peer messages concern machine performance, not Python imports.
 
 ### Pylance Missing Indexing of Extensions
 

@@ -26,7 +26,9 @@ INSTALL_REQUIRES = [
     "numpy",
     "pandas",
     "pinocchio",
+    "pybullet==3.2.7",
     # rl
+    "rsl-rl-lib==5.0.1",
     "cusrl[all]",
 ]
 

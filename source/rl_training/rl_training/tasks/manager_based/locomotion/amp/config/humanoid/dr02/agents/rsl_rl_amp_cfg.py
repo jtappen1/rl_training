@@ -8,7 +8,6 @@ from dataclasses import MISSING, field
 from isaaclab.utils import configclass
 from isaaclab_rl.rsl_rl.rl_cfg import (
     RslRlOnPolicyRunnerCfg,
-    RslRlMLPModelCfg,
     RslRlPpoAlgorithmCfg,
 )
 
@@ -155,20 +154,24 @@ class DR02AmpRunnerCfg(RslRlOnPolicyRunnerCfg):
 
     class_name: str = "rl_training.rsl_rl.runners:AMPOnPolicyRunner"
 
+    # Isaac Lab 2.3 requires this legacy field; AMP uses actor/critic below.
+    policy = None
+
     # Actor
-    actor: RslRlMLPModelCfg = RslRlMLPModelCfg(
+    actor: dict = dict(
         class_name="MLPModel",
         hidden_dims=[1024, 256, 128],
         activation="elu",
         obs_normalization=False,
-        distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(
+        distribution_cfg=dict(
+            class_name="GaussianDistribution",
             init_std=1.0,
             std_type="scalar",
         ),
     )
 
     # Critic
-    critic: RslRlMLPModelCfg = RslRlMLPModelCfg(
+    critic: dict = dict(
         class_name="MLPModel",
         hidden_dims=[1024, 512, 256, 128],
         activation="elu",

@@ -17,7 +17,7 @@ from isaaclab.sensors import ContactSensorCfg
 from isaaclab.sim import PhysxCfg, RenderCfg, SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
+from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.utils.noise import UniformNoiseCfg as Unoise
 
 import rl_training.tasks.manager_based.locomotion.amp.mdp as mdp
@@ -74,11 +74,8 @@ class AmpSceneCfg(InteractiveSceneCfg):
             dynamic_friction=1.0,
             restitution=1.0,
         ),
-        visual_material=sim_utils.MdlFileCfg(
-            mdl_path=f"{ISAACLAB_NUCLEUS_DIR}/Materials/TilesMarbleSpiderWhiteBrickBondHoned/TilesMarbleSpiderWhiteBrickBondHoned.mdl",
-            project_uvw=True,
-            texture_scale=(0.25, 0.25),
-        ),
+        # Plane terrain uses only diffuse_color; preserve the previous fallback color.
+        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.0, 0.0)),
         debug_vis=False,
     )
 
