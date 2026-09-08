@@ -204,7 +204,7 @@ python scripts/tools/compare_runs.py \
 ### DR02 startup errors
 
 - **`CXXABI_1.3.15 not found`, `omni.kit has no attribute test`, or `cannot import name tests`:** the latter errors can cascade from the C++ runtime failure. Run `python scripts/tools/setup_conda_runtime.py` in your activated Conda environment, then deactivate/reactivate it and restart training. An already running Python process cannot pick up the new runtime.
-- **Missing `DR02-pro.urdf`:** run `git submodule update --init --recursive` from the repository root.
+- **Missing `DR02-pro.urdf` or `DR02-pro_fix_joints.urdf`:** run `git submodule update --init --recursive` from the repository root.
 - **Missing `pybullet_utils` or incompatible RSL-RL:** re-run `python -m pip install -e source/rl_training` in the environment used for training. The package declares the tested versions. The training scripts use the repository's config converter for RSL-RL 5, so the missing Isaac Lab `handle_deprecated_rsl_rl_cfg` helper is not required.
 
 Some startup warnings remain with the tested setup. A missing viewport is expected in headless mode. The DR02 URDF contains fixed sensor links without inertia; the importer assigns small inertias and adjusts joint axes. These messages do not prevent training, but changing the robot's inertial properties should be based on measured model data. CPU powersave and GPU peer-to-peer messages concern machine performance, not Python imports.
