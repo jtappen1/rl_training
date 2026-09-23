@@ -148,7 +148,8 @@ class HeightmapOverlay(gym.Wrapper):
         lines = [f"policy height map  ({self.x_extent[0]:+.1f}..{self.x_extent[1]:+.1f} m fwd)"]
         if self.label_fn is not None:
             lines.append(self.label_fn(self._step))
-        panel_w = max(inset.width, 300) + 2 * pad
+        text_w = max(int(self.font.getlength(line)) for line in lines)
+        panel_w = max(inset.width, 300, text_w) + 2 * pad
         panel_h = inset.height + bar_h + text_h * (len(lines) + 1) + 3 * pad
         panel = Image.new("RGB", (panel_w, panel_h), (20, 20, 20))
         panel.paste(inset, (pad, pad))
