@@ -2,6 +2,10 @@
 **/*.dmp
 **/.thumbs
 
+rl
+eval
+**/.venv*
+
 # Python
 .DS_Store
 **/*.egg-info/

@@ -51,6 +51,27 @@ parser.add_argument("--time_out_s", type=float, default=12.0, help="Per-trial ti
 parser.add_argument("--out_dir", type=str, default="eval", help="Directory for the CSV/markdown report.")
 parser.add_argument("--video", action="store_true", default=False, help="Record a video of the run.")
 parser.add_argument("--video_length", type=int, default=300, help="Length of the recorded video (in steps).")
+parser.add_argument(
+    "--follow_env_id", type=int, default=0,
+    help="Env index the video camera should follow (dynamic asset-root tracking, re-centers every"
+    " frame on that env's robot). Pass -1 to keep Isaac Lab's default fixed world-space viewer"
+    " camera instead (the wide/far view of the whole tiled terrain grid).",
+)
+parser.add_argument(
+    "--camera_eye", type=float, nargs=3, default=[-1.5, 2.5, 1.2],
+    help="Camera position as an (x,y,z) offset in meters from the followed robot's root (only used"
+    " when --follow_env_id >= 0). Default is a 3/4 side-behind angle facing the direction of travel"
+    " (robots walk out from their tile centre along local +x).",
+)
+parser.add_argument(
+    "--camera_lookat", type=float, nargs=3, default=[1.0, 0.0, 0.1],
+    help="Camera look-at target as an (x,y,z) offset in meters from the followed robot's root (only"
+    " used when --follow_env_id >= 0). Default looks slightly ahead of and down at the robot.",
+)
+parser.add_argument(
+    "--no_heightmap_viz", action="store_true", default=False,
+    help="With --video, do NOT draw the policy height map (3D ray-hit spheres + top-down inset) in the recording.",
+)
 parser.add_argument("--seed", type=int, default=42)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -69,6 +90,7 @@ simulation_app = app_launcher.app
 """Rest everything follows."""
 
 import csv
+import math
 import glob
 import itertools
 import re
@@ -95,13 +117,13 @@ if version.parse(installed_version) < version.parse(RSL_RL_VERSION):
 from rsl_rl.runners import OnPolicyRunner
 
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
+from isaaclab_tasks.utils import load_cfg_from_registry
 
 import rl_training.tasks  # noqa: F401
-from rl_training.tasks.manager_based.locomotion.velocity.config.wheeled.deeprobotics_m20.agents.rsl_rl_ppo_cfg import (
-    DeeproboticsM20RoughPPORunnerCfg,
-)
-from rl_training.tasks.manager_based.locomotion.velocity.config.wheeled.deeprobotics_m20.rough_env_cfg import (
-    DeeproboticsM20RoughEnvCfg,
+from rl_training.tasks.manager_based.locomotion.velocity.config.wheeled.deeprobotics_m20.stairs_env_cfg import (  # noqa: E402
+    TASK_STAIR_ASCENT,
+    TASK_STAIR_DESCENT,
+    set_task_ids_per_column,
 )
 
 # ---------------------------------------------------------------------------
@@ -121,6 +143,17 @@ GEN_BORDER_WIDTH = 4.0
 ROBOT_LENGTH_MARGIN = 0.3
 
 DIRECTIONS = ("ascent", "descent")
+# Front wheel axle is ~0.4 m ahead of the root on the 0.82 m-long M20.
+FRONT_WHEEL_OFFSET = 0.4
+
+
+def _yaw(quat_wxyz: torch.Tensor) -> torch.Tensor:
+    w, x, y, z = quat_wxyz.unbind(-1)
+    return torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+def _wrap(angle: torch.Tensor) -> torch.Tensor:
+    return torch.atan2(torch.sin(angle), torch.cos(angle))
 
 
 def resolve_checkpoint(path: str) -> str:
@@ -191,26 +224,51 @@ def build_terrain_generator(combos: list[dict]) -> TerrainGeneratorCfg:
     )
 
 
-def build_env_cfg(combos: list[dict]) -> DeeproboticsM20RoughEnvCfg:
-    """Start from the exact blind-checkpoint task config and swap in the eval terrain + fixed command.
+def build_env_cfg(combos: list[dict]) -> object:
+    """Start from `--task`'s own registered env cfg and swap in the eval terrain + fixed command.
 
-    Deliberately does NOT touch `observations` (besides disabling noise) -- the loaded checkpoint
-    is blind (height_scan=None) and any obs shape change would break `ppo_runner.load()`.
+    Deliberately does NOT touch `observations` (besides disabling noise) -- whatever the loaded
+    checkpoint's obs shape is (blind or sighted), changing it here would break `ppo_runner.load()`.
+    Resolved dynamically via the gym registry (`load_cfg_from_registry`) rather than hardcoding a
+    single task's config class, so this same fixed-geometry benchmark works for any registered M20
+    task (blind `Rough-...`, sighted `Stairs-Sighted-...`, etc.) -- same terrain/commands, whatever
+    observations/rewards/architecture that task's own cfg defines.
     """
-    env_cfg = DeeproboticsM20RoughEnvCfg()
+    env_cfg = load_cfg_from_registry(args_cli.task, "env_cfg_entry_point")
     env_cfg.scene.num_envs = len(combos) * args_cli.repeats
     env_cfg.seed = args_cli.seed
     env_cfg.episode_length_s = args_cli.time_out_s
 
-    # ---- fixed evaluation terrain (replaces the training ROUGH_TERRAINS_CFG instance; does not
-    # mutate the shared object, per command.md's ground rules) ----
+    # ---- fixed evaluation terrain (replaces the training terrain generator instance; does not
+    # mutate any shared object, per command.md's ground rules) ----
     env_cfg.scene.terrain.terrain_generator = build_terrain_generator(combos)
     env_cfg.scene.terrain.max_init_terrain_level = 0
 
-    # single-row terrain has no difficulty levels to promote/demote through
-    env_cfg.curriculum.terrain_levels = None
-    env_cfg.curriculum.gait_level = None
-    env_cfg.curriculum.command_levels = None
+    # single-row terrain has no difficulty levels to promote/demote through. Covers both the
+    # blind Rough cfg's 3 curriculum terms and the stairs cfgs' extra 3.4 per-task logging terms
+    # (`terrain_level_by_task`) -- those bake in a `task_ids_per_column` list sized for the
+    # *training* terrain's column count, which would silently index out-of-bounds against this
+    # eval terrain's different column layout if left active (hasattr-guarded since not every task
+    # cfg has all of these).
+    for _name in (
+        "terrain_levels",
+        "gait_level",
+        "command_levels",
+        "terrain_level_flat_rough",
+        "terrain_level_stair_ascent",
+        "terrain_level_stair_descent",
+    ):
+        if hasattr(env_cfg.curriculum, _name):
+            setattr(env_cfg.curriculum, _name, None)
+
+    # Stair-aware reward/termination terms (e.g. `Stairs-Sighted-V2-...`) bake in a raw terrain
+    # column -> task ID list sized for the *training* terrain. Re-point them at this eval terrain's
+    # columns (one per combo), or the stair-specific termination would silently use the wrong
+    # limits (or index out of bounds). No-op for tasks without such terms.
+    set_task_ids_per_column(
+        env_cfg,
+        [TASK_STAIR_ASCENT if c["direction"] == "ascent" else TASK_STAIR_DESCENT for c in combos],
+    )
 
     # deterministic spawn: tile centre, heading straight across the stairs (local +x)
     env_cfg.events.randomize_reset_base.params = {
@@ -240,6 +298,17 @@ def build_env_cfg(combos: list[dict]) -> DeeproboticsM20RoughEnvCfg:
     # match play.py: noise-free observations for evaluation
     env_cfg.observations.policy.enable_corruption = False
 
+    # Video camera: default to dynamically tracking one robot's root pose every frame (see
+    # `isaaclab.envs.ui.viewport_camera_controller`'s `origin_type="asset_root"` handling) instead
+    # of Isaac Lab's default fixed world-space viewer camera, which frames the whole tiled grid of
+    # envs from far away and isn't useful for actually watching one robot climb.
+    if args_cli.follow_env_id >= 0:
+        env_cfg.viewer.origin_type = "asset_root"
+        env_cfg.viewer.asset_name = "robot"
+        env_cfg.viewer.env_index = args_cli.follow_env_id
+        env_cfg.viewer.eye = tuple(args_cli.camera_eye)
+        env_cfg.viewer.lookat = tuple(args_cli.camera_lookat)
+
     return env_cfg
 
 
@@ -251,6 +320,7 @@ def write_outputs(rows: list[dict]) -> None:
     fieldnames = [
         "speed", "direction", "step_height", "tread_width", "env_id",
         "outcome", "time_to_cross_s", "collisions", "stumbles",
+        "yaw_drift_deg", "yaw_drift_on_stairs_deg", "lateral_offset_m",
     ]
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -263,7 +333,7 @@ def write_outputs(rows: list[dict]) -> None:
         groups[(r["speed"], r["direction"], r["step_height"])].append(r)
 
     lines = [
-        "# Stairs evaluation -- blind baseline",
+        f"# Stairs evaluation -- `{args_cli.task}`",
         "",
         f"Checkpoint: `{resolve_checkpoint(args_cli.checkpoint)}`",
         "",
@@ -271,9 +341,15 @@ def write_outputs(rows: list[dict]) -> None:
         " (speed, direction, step height) cell). Tread widths are aggregated together in this summary;"
         " see the CSV for the per-tread-width breakdown.",
         "",
+        "Yaw drift / lateral offset: heading change and sideways (+ = left) displacement from the start"
+        " pose, measured when the trial ends (crossing, fall or timeout); mean +/- std over trials."
+        " 'On stairs' counts only the heading change after the front wheels reach the first riser."
+        " The command has zero yaw rate and no heading control, so any drift comes from the policy.",
+        "",
         "| speed (m/s) | direction | step height (m) | n | success rate | mean time-to-cross (s) |"
-        " collisions/trial | stumbles/trial | falls |",
-        "|---|---|---|---|---|---|---|---|---|",
+        " collisions/trial | stumbles/trial | falls | yaw drift (deg) | yaw drift on stairs (deg) |"
+        " lateral offset (m) |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for key in sorted(groups.keys()):
         speed, direction, height = key
@@ -285,9 +361,15 @@ def write_outputs(rows: list[dict]) -> None:
         mean_time = (sum(r["time_to_cross_s"] for r in successes) / len(successes)) if successes else float("nan")
         mean_collisions = sum(r["collisions"] for r in g) / n
         mean_stumbles = sum(r["stumbles"] for r in g) / n
+
+        def _mean_std(field):
+            v = torch.tensor([r[field] for r in g], dtype=torch.float64)
+            return f"{v.mean().item():+.2f} +/- {v.std(unbiased=False).item():.2f}"
+
         lines.append(
             f"| {speed:.1f} | {direction} | {height:.2f} | {n} | {success_rate * 100:.0f}% | "
-            f"{mean_time:.2f} | {mean_collisions:.2f} | {mean_stumbles:.2f} | {len(falls)} |"
+            f"{mean_time:.2f} | {mean_collisions:.2f} | {mean_stumbles:.2f} | {len(falls)} | "
+            f"{_mean_std('yaw_drift_deg')} | {_mean_std('yaw_drift_on_stairs_deg')} | {_mean_std('lateral_offset_m')} |"
         )
     md_path = os.path.join(args_cli.out_dir, f"eval_stairs_{timestamp}.md")
     with open(md_path, "w") as f:
@@ -303,9 +385,24 @@ def main():
     print(f"[INFO] Using checkpoint: {checkpoint_path}")
     print(f"[INFO] {len(combos)} combos x {args_cli.repeats} repeats = {env_cfg.scene.num_envs} envs")
 
-    agent_cfg = DeeproboticsM20RoughPPORunnerCfg()
+    agent_cfg = load_cfg_from_registry(args_cli.task, "rsl_rl_cfg_entry_point")
 
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+
+    if args_cli.video and not args_cli.no_heightmap_viz:
+        from heightmap_overlay import HeightmapOverlay
+
+        viz_env_id = max(args_cli.follow_env_id, 0)
+        viz_combo = combos[int(env.unwrapped.scene.terrain.terrain_types[viz_env_id])]
+        viz_dt = env.unwrapped.step_dt
+        env = HeightmapOverlay(
+            env,
+            env_id=viz_env_id,
+            label_fn=lambda step: (
+                f"env {viz_env_id}: {viz_combo['direction']} h={viz_combo['step_height']:.2f} m"
+                f" tread={viz_combo['tread_width']:.2f} m  t={step * viz_dt:.1f} s"
+            ),
+        )
 
     if args_cli.video:
         video_kwargs = {
@@ -340,9 +437,13 @@ def main():
     device = env.unwrapped.device
     num_envs = env.unwrapped.num_envs
     target_x = torch.zeros(num_envs, device=device)
+    stair_start_x = torch.zeros(num_envs, device=device)
     for i, combo in enumerate(combo_of_env):
         n_steps = num_stairs_steps(combo["tread_width"])
         target_x[i] = PLATFORM_WIDTH / 2.0 + n_steps * combo["tread_width"] + ROBOT_LENGTH_MARGIN
+        # the generator builds steps inward from the border, so the first riser sits where the
+        # (actual, smaller-than-`platform_width`) centre platform ends
+        stair_start_x[i] = (TILE_SIZE - 2 * SUB_BORDER_WIDTH) / 2.0 - n_steps * combo["tread_width"]
 
     # contact sensor body groups for collision / stumble detection (same patterns rough_env_cfg.py
     # wires up for the undesired_contacts / feet_stumble reward terms, just read out directly here
@@ -365,6 +466,11 @@ def main():
         obs, _ = env.reset()
         robot = env.unwrapped.scene["robot"]
         x0 = robot.data.root_pos_w[:, 0].clone()
+        y0 = robot.data.root_pos_w[:, 1].clone()
+        yaw0 = _yaw(robot.data.root_quat_w)
+        yaw_at_entry = torch.full((num_envs,), float("nan"), device=device)
+        yaw_end = yaw0.clone()
+        y_end = y0.clone()
 
         finalized = torch.zeros(num_envs, dtype=torch.bool, device=device)
         outcome = ["timeout"] * num_envs
@@ -399,6 +505,14 @@ def main():
             prev_collide = collide_now
 
             progress = robot.data.root_pos_w[:, 0] - x0
+            # heading / sideways drift, frozen once a trial is finalized (so post-crossing motion
+            # doesn't count); stair entry = front wheels (~0.4 m ahead of the root) at the first riser
+            yaw_now = _yaw(robot.data.root_quat_w)
+            live = ~finalized
+            entered = live & torch.isnan(yaw_at_entry) & (progress >= stair_start_x - FRONT_WHEEL_OFFSET)
+            yaw_at_entry = torch.where(entered, yaw_now, yaw_at_entry)
+            yaw_end = torch.where(live, yaw_now, yaw_end)
+            y_end = torch.where(live, robot.data.root_pos_w[:, 1], y_end)
             newly_success = (progress >= target_x) & ~finalized
             for idx in newly_success.nonzero(as_tuple=True)[0].tolist():
                 outcome[idx] = "success"
@@ -424,6 +538,12 @@ def main():
                 "time_to_cross_s": time_to_cross[i],
                 "collisions": collisions[i].item(),
                 "stumbles": stumbles[i].item(),
+                "yaw_drift_deg": math.degrees(_wrap(yaw_end[i] - yaw0[i]).item()),
+                "yaw_drift_on_stairs_deg": (
+                    math.degrees(_wrap(yaw_end[i] - yaw_at_entry[i]).item())
+                    if not torch.isnan(yaw_at_entry[i]) else 0.0
+                ),
+                "lateral_offset_m": (y_end[i] - y0[i]).item(),
             })
         n_success = sum(1 for r in all_rows if r["speed"] == speed and r["outcome"] == "success")
         n_fall = sum(1 for r in all_rows if r["speed"] == speed and r["outcome"] == "fall")
