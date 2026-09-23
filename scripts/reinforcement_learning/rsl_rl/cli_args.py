@@ -109,8 +109,17 @@ def convert_rsl_rl_cfg_dict(cfg_dict: dict) -> dict:
     Returns:
         The converted config dict compatible with rsl-rl v5+.
     """
-    if "actor" in cfg_dict and "critic" in cfg_dict:
-        # Already in new format
+    if cfg_dict.get("actor") and cfg_dict.get("critic"):
+        # Already in new format. `RslRlOnPolicyRunnerCfg` carries both the legacy `policy` field
+        # (which every runner cfg in this repo actually populates) and newer `actor`/`critic`
+        # fields that default to the `MISSING` sentinel when unset -- and `class_to_dict`
+        # (isaaclab/utils/dict.py) serializes that sentinel as an *empty dict* (it has a `__dict__`
+        # of `{}`, so it recurses into "a dict with no keys" rather than keeping `MISSING` as-is).
+        # So neither a bare key-presence check nor an `isinstance(..., dict)` check is enough to
+        # detect "still old-format" here -- both are true for an empty placeholder dict too, which
+        # skips this conversion entirely and crashes later with `KeyError: 'class_name'` inside
+        # rsl_rl's `construct_algorithm`. Truthiness (non-empty) is what actually distinguishes a
+        # real populated actor/critic dict from the unset placeholder.
         return cfg_dict
 
     policy = cfg_dict.pop("policy", {})
