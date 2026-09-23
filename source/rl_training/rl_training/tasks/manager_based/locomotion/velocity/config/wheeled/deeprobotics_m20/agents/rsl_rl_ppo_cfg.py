@@ -46,3 +46,42 @@ class DeeproboticsM20FlatPPORunnerCfg(DeeproboticsM20RoughPPORunnerCfg):
 
         self.max_iterations = 5000
         self.experiment_name = "deeprobotics_m20_flat"
+
+
+@configclass
+class DeeproboticsM20StairsTeacherPPORunnerCfg(DeeproboticsM20RoughPPORunnerCfg):
+    """Milestone A runner cfg (command.md Phase 3/4).
+
+    Placeholder plain single-MLP actor-critic so `stairs_env_cfg.py` has something to smoke-test
+    against now. Phase 4 replaces `policy`/`algorithm` here with the MoE actor + multi-critic
+    architecture (`docs/stairs_research_notes.md` sec 11) -- this class name is expected to be
+    rewritten in place when that lands, not kept around as a permanent "simple" alternative.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.experiment_name = "deeprobotics_m20_stairs_teacher"
+
+
+@configclass
+class DeeproboticsM20StairsSightedPPORunnerCfg(DeeproboticsM20StairsTeacherPPORunnerCfg):
+    """Runner cfg for the plain sighted single-task validation run (see `stairs_env_cfg.py`).
+
+    Identical plain single-MLP actor-critic, just its own `experiment_name` so its logs don't land
+    in the same directory as the blind Phase-3-smoke-test runs of `Stairs-Teacher-...-v0`.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.experiment_name = "deeprobotics_m20_stairs_sighted"
+        self.max_iterations = 3000
+
+
+@configclass
+class DeeproboticsM20StairsSightedV2PPORunnerCfg(DeeproboticsM20StairsSightedPPORunnerCfg):
+    """Runner cfg for `Stairs-Sighted-V2-Deeprobotics-M20-v0` (stair-aware rewards/curriculum)."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.experiment_name = "deeprobotics_m20_stairs_sighted_v2"
+        self.max_iterations = 6000
