@@ -134,6 +134,8 @@ START_X = 2.0  # robot root spawn, metres into the first flat segment
 HORIZONTAL_SCALE = 0.05
 VERTICAL_SCALE = 0.005
 FINISH_MARGIN = 2.5  # "finished" = root within this of the course end
+WHEEL_RADIUS = 0.09  # M20 wheel collision cylinder (urdf)
+STOPPED_RIM_SPEED = 0.1  # m/s; below this a planted wheel counts as stopped
 
 
 def segment_label(seg: dict) -> str:
@@ -406,6 +408,14 @@ def main():
     contact = base_env.scene["contact_forces"]
     wheel_ids = torch.tensor(contact.find_bodies(env_cfg.foot_link_name)[0], device=base_env.device)
     body_ids = torch.tensor(contact.find_bodies(f"^(?!.*{env_cfg.foot_link_name}).*")[0], device=base_env.device)
+    # per-wheel logging, in a fixed fl/fr/hl/hr order on both the contact sensor and the joints
+    wheel_tags = ["fl", "fr", "hl", "hr"]
+    wheel_body_ids = torch.tensor(
+        contact.find_bodies([f"{w}_wheel" for w in wheel_tags], preserve_order=True)[0], device=base_env.device
+    )
+    wheel_joint_ids = torch.tensor(
+        robot.find_joints([f"{w}_wheel_joint" for w in wheel_tags], preserve_order=True)[0], device=base_env.device
+    )
     dt = base_env.step_dt
 
     obs, _ = env.reset()
@@ -458,6 +468,13 @@ def main():
 
         f = contact.data.net_forces_w[0]
         stumble = bool(torch.any(torch.linalg.norm(f[wheel_ids, :2], dim=-1) > 4.0 * f[wheel_ids, 2].abs()))
+        # rim speed = |wheel angular velocity| x radius; grounded = in contact; on_riser = pressed
+        # against a vertical face (same test as the stumble metric)
+        rim = (robot.data.joint_vel[0, wheel_joint_ids].abs() * WHEEL_RADIUS).tolist()
+        grounded = (contact.data.current_contact_time[0, wheel_body_ids] > 0.0).tolist()
+        fw = f[wheel_body_ids]
+        on_riser = (torch.linalg.norm(fw[:, :2], dim=-1) > 4.0 * fw[:, 2].abs()).tolist()
+        base_speed = torch.linalg.norm(robot.data.root_lin_vel_w[0, :2]).item()
         collide = bool(torch.any(torch.linalg.norm(f[body_ids], dim=-1) > 1.0))
 
         ps = per_seg[si]
@@ -472,7 +489,10 @@ def main():
 
         traj.append(dict(t=round(t, 3), course_x=cx, lateral_m=lat, base_z=(pos[2] - origin[2]).item(),
                          yaw_deg=math.degrees(yaw), pitch_deg=pitch, roll_deg=roll, segment=segs[si]["label"],
-                         stumble=int(stumble), collision=int(collide)))
+                         stumble=int(stumble), collision=int(collide), base_speed=base_speed,
+                         **{f"rim_{w}": rim[k] for k, w in enumerate(wheel_tags)},
+                         **{f"ground_{w}": int(grounded[k]) for k, w in enumerate(wheel_tags)},
+                         **{f"riser_{w}": int(on_riser[k]) for k, w in enumerate(wheel_tags)}))
         hud["text"] = (f"{segs[si]['label']}  |  t {t:5.1f} s  x {cx:5.1f} m  heading {math.degrees(yaw):+5.1f} deg"
                        f"  sideways {lat:+.2f} m")
 
@@ -536,6 +556,37 @@ def main():
             f"| {i} | {s['label']} | {dur:.1f} | {speed:.2f} | {math.degrees(_wrap(ps['yaw_out'] - ps['yaw_in'])):+.1f} |"
             f" {ps['y_out'] - ps['y_in']:+.2f} | {ps['stumbles']} | {ps['collisions']} | {ps['max_pitch']:.0f} |"
             f" {ps['max_roll']:.0f} |"
+        )
+    lines += [
+        "",
+        "## Wheel use per segment",
+        "",
+        f"Rim speed = |wheel angular velocity| x {WHEEL_RADIUS} m. 'Planted & stopped' = share of grounded-wheel"
+        f" time with rim speed < {STOPPED_RIM_SPEED} m/s. 'On riser' = a wheel pressed against a vertical face"
+        " (the stumble test); its rim speed shows whether the wheel keeps driving into the riser or stops."
+        " 'Airborne' = wheels off the ground (lifted or stepping).",
+        "",
+        "| # | segment | base speed (m/s) | grounded rim speed (m/s) | planted & stopped | airborne share |"
+        " airborne rim speed (m/s) | on-riser share | on-riser rim speed (m/s) |",
+        "|---|---|---|---|---|---|---|---|---|",
+    ]
+    for i, s in enumerate(segs):
+        rows_s = [r for r in traj if s["x0"] <= r["course_x"] < s["x1"]]
+        if not rows_s:
+            continue
+        ground, air, riser = [], [], []
+        for r in rows_s:
+            for w in wheel_tags:
+                (ground if r[f"ground_{w}"] else air).append(r[f"rim_{w}"])
+                if r[f"riser_{w}"]:
+                    riser.append(r[f"rim_{w}"])
+        n_wheel = 4 * len(rows_s)
+        mean = lambda v: (sum(v) / len(v)) if v else float("nan")  # noqa: E731
+        stopped = (sum(1 for v in ground if v < STOPPED_RIM_SPEED) / len(ground)) if ground else float("nan")
+        lines.append(
+            f"| {i} | {s['label']} | {mean([r['base_speed'] for r in rows_s]):.2f} | {mean(ground):.2f} |"
+            f" {100 * stopped:.0f}% | {100 * len(air) / n_wheel:.0f}% | {mean(air):.2f} |"
+            f" {100 * len(riser) / n_wheel:.0f}% | {mean(riser):.2f} |"
         )
     lines += ["", "Files: `course.mp4` (if recorded), `course_plot.png`, `trajectory.csv`."]
     with open(os.path.join(run_dir, "report.md"), "w") as fmd:
