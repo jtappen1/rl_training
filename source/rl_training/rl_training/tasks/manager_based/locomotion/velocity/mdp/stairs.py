@@ -45,6 +45,7 @@ __all__ = [
     "stair_progress",
     "stair_wheel_clearance",
     "terrain_levels_stairs",
+    "track_heading_exp",
 ]
 
 
@@ -332,6 +333,69 @@ def stair_wheel_clearance(
     vel_b = asset.data.root_lin_vel_b[:, :2]
     moving = (torch.sum(vel_b * cmd_dir, dim=1) > min_speed) & (torch.linalg.norm(cmd, dim=1) > 0.1)
     return torch.sum(score, dim=1) * (stairs & moving).float()
+
+
+##
+# Heading
+##
+
+
+class track_heading_exp(ManagerTermBase):
+    """Reward holding the commanded heading, not just the commanded yaw rate.
+
+    `track_ang_vel_z_exp` only scores the yaw *rate*; a small constant bias costs almost nothing
+    per step but integrates into a large heading error (the course eval saw +31 deg over one
+    rough patch with yaw-rate command 0). This scores the heading itself:
+
+    - heading-controlled envs: target = the command term's `heading_target`;
+    - all other envs: target = the heading when the command was last (re)sampled, advanced by the
+      commanded yaw rate (so a yaw-rate-0 command means "hold the heading you had").
+
+    `exp(-err^2 / std^2)`. If a non-heading env ends up more than `reanchor_error` off (e.g. after
+    a push), its reference is re-anchored to the current heading so the term keeps giving a
+    usable signal instead of sitting at ~0.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        self.asset: Articulation = env.scene[cfg.params.get("asset_cfg", SceneEntityCfg("robot")).name]
+        self.ref = torch.zeros(env.num_envs, device=env.device)
+        self.prev_cmd = torch.zeros(env.num_envs, 3, device=env.device)
+        self.needs_init = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        if env_ids is None:
+            self.needs_init[:] = True
+        else:
+            self.needs_init[env_ids] = True
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        command_name: str,
+        std: float,
+        reanchor_error: float = 1.57,
+        asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    ) -> torch.Tensor:
+        term = env.command_manager.get_term(command_name)
+        cmd = term.command
+        heading = self.asset.data.heading_w
+        heading_env = term.is_heading_env
+
+        # non-heading commands are constant between resamples, so a change means a new command
+        resampled = torch.any(cmd != self.prev_cmd, dim=1) & ~heading_env
+        self.ref = self.ref + cmd[:, 2] * env.step_dt
+        self.ref = torch.where(self.needs_init | resampled, heading, self.ref)
+        self.needs_init[:] = False
+        self.prev_cmd = cmd.clone()
+
+        target = torch.where(heading_env, term.heading_target, self.ref)
+        err = torch.atan2(torch.sin(target - heading), torch.cos(target - heading))
+        reward = torch.exp(-torch.square(err) / std**2)
+
+        far = ~heading_env & (torch.abs(err) > reanchor_error)
+        self.ref = torch.where(far, heading, self.ref)
+        return reward
 
 
 ##

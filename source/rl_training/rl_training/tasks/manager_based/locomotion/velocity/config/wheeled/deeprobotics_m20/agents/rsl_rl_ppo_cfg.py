@@ -85,3 +85,21 @@ class DeeproboticsM20StairsSightedV2PPORunnerCfg(DeeproboticsM20StairsSightedPPO
         super().__post_init__()
         self.experiment_name = "deeprobotics_m20_stairs_sighted_v2"
         self.max_iterations = 6000
+
+
+@configclass
+class DeeproboticsM20StairsSightedV3PPORunnerCfg(DeeproboticsM20StairsSightedV2PPORunnerCfg):
+    """Runner cfg for `Stairs-Sighted-V3-Deeprobotics-M20-v0` (heading hold, no stepping reward)."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.experiment_name = "deeprobotics_m20_stairs_sighted_v3"
+
+
+@configclass
+class DeeproboticsM20StairsSightedV3bPPORunnerCfg(DeeproboticsM20StairsSightedV3PPORunnerCfg):
+    """Runner cfg for `Stairs-Sighted-V3b-Deeprobotics-M20-v0` (v3 + stepping reward restored)."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.experiment_name = "deeprobotics_m20_stairs_sighted_v3b"

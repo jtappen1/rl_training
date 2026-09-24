@@ -431,6 +431,25 @@ def build_stairs_terrain_generator_v2() -> TerrainGeneratorCfg:
     )
 
 
+def stair_wheel_clearance_term(columns: list[int]) -> RewTerm:
+    """The v2 wheel-clearance (stepping) reward term, shared so every config that uses it gets the
+    identical term."""
+    wheel_names = ["fl_wheel", "fr_wheel", "hl_wheel", "hr_wheel"]
+    return RewTerm(
+        func=mdp.stair_wheel_clearance,
+        weight=1.0,
+        params={
+            "command_name": "base_velocity",
+            "task_ids_per_column": columns,
+            "stair_task_ids": STAIR_TASK_IDS,
+            "sensor_cfg": SceneEntityCfg("height_scanner"),
+            "contact_sensor_cfg": SceneEntityCfg("contact_forces", body_names=wheel_names, preserve_order=True),
+            "asset_cfg": SceneEntityCfg("robot", body_names=wheel_names, preserve_order=True),
+            "wheel_radius": 0.09,
+        },
+    )
+
+
 def set_task_ids_per_column(env_cfg, columns: list[int]) -> None:
     """Overwrite `task_ids_per_column` in every reward/termination/curriculum term that takes it.
 
@@ -529,20 +548,7 @@ class DeeproboticsM20StairsSightedV2EnvCfg(DeeproboticsM20StairsSightedEnvCfg):
             term.params["rough_penalty_scale"] = 0.1
 
         # (5) wheel clearance + stumble
-        wheel_names = ["fl_wheel", "fr_wheel", "hl_wheel", "hr_wheel"]
-        self.rewards.stair_wheel_clearance = RewTerm(
-            func=mdp.stair_wheel_clearance,
-            weight=1.0,
-            params={
-                "command_name": "base_velocity",
-                "task_ids_per_column": columns,
-                "stair_task_ids": STAIR_TASK_IDS,
-                "sensor_cfg": SceneEntityCfg("height_scanner"),
-                "contact_sensor_cfg": SceneEntityCfg("contact_forces", body_names=wheel_names, preserve_order=True),
-                "asset_cfg": SceneEntityCfg("robot", body_names=wheel_names, preserve_order=True),
-                "wheel_radius": 0.09,
-            },
-        )
+        self.rewards.stair_wheel_clearance = stair_wheel_clearance_term(columns)
         self.rewards.feet_stumble.weight = -3.0
 
         # ------------------------------ Curriculum (7) ------------------------------
@@ -573,6 +579,114 @@ class DeeproboticsM20StairsSightedV2EnvCfg_PLAY(DeeproboticsM20StairsSightedV2En
 
         if self.scene.terrain.terrain_generator is not None:
             # keep `curriculum=True`, see `DeeproboticsM20StairsTeacherEnvCfg_PLAY`
+            self.scene.terrain.terrain_generator.num_rows = 5
+            self.scene.terrain.terrain_generator.num_cols = 8
+            set_task_ids_per_column(self, task_id_per_column(self.scene.terrain.terrain_generator))
+        self.scene.terrain.max_init_terrain_level = None
+
+        self.commands.base_velocity.ranges.lin_vel_x = (0.5, 0.5)
+        self.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
+        self.commands.base_velocity.ranges.ang_vel_z = (0.0, 0.0)
+        self.commands.base_velocity.rel_standing_envs = 0.0
+        self.commands.base_velocity.rel_zero_vel_envs = 0.0
+        self.commands.base_velocity.rel_only_lin_x_envs = 0.0
+        self.commands.base_velocity.rel_only_lin_y_envs = 0.0
+        self.commands.base_velocity.rel_only_ang_z_envs = 0.0
+
+
+@configclass
+class DeeproboticsM20StairsSightedV3EnvCfg(DeeproboticsM20StairsSightedV2EnvCfg):
+    """Sighted spike v3 (2026-09-23): hold a heading on its own; no stepping reward.
+
+    v2 finished the multi-terrain straight-line course with heading-hold steering, but with the
+    yaw-rate command held at 0 and no heading correction it veered left (+31 deg over a 0.05 m
+    rough patch) and drove off the course after 22 s. In training every env was heading-controlled,
+    so the command generator corrected any drift for free, and `track_ang_vel_z_exp` at std
+    sqrt(0.5) barely noticed a small yaw-rate bias. Changes vs v2:
+
+    1. `track_heading` reward (all terrain): scores the heading itself, against the command's
+       heading target, or for non-heading envs the heading held since the command was sampled.
+    2. 25% of envs get a forward-only command (yaw rate 0, heading control off), like the course
+       eval's `--steering straight`; yaw-rate tracking std sqrt(0.5) -> 0.3.
+    3. `stair_wheel_clearance` removed, to see whether leg lifting over risers is learned from the
+       progress reward and `feet_stumble` alone.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        # (1) heading
+        self.rewards.track_heading = RewTerm(
+            func=mdp.track_heading_exp,
+            weight=2.0,
+            params={"command_name": "base_velocity", "std": 0.25},
+        )
+        # (2) straight-command envs + tighter yaw-rate tracking
+        self.commands.base_velocity.rel_only_lin_x_envs = 0.25
+        self.rewards.track_ang_vel_z_exp.params["std"] = 0.3
+        # (3) no stepping reward
+        self.rewards.stair_wheel_clearance = None
+
+
+@configclass
+class DeeproboticsM20StairsSightedV3EnvCfg_PLAY(DeeproboticsM20StairsSightedV3EnvCfg):
+    """Play/video variant: fewer envs, no pushes, fixed forward command."""
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.scene.num_envs = 50
+        self.scene.env_spacing = 2.5
+        self.observations.policy.enable_corruption = False
+        self.events.randomize_push_robot = None
+
+        if self.scene.terrain.terrain_generator is not None:
+            self.scene.terrain.terrain_generator.num_rows = 5
+            self.scene.terrain.terrain_generator.num_cols = 8
+            set_task_ids_per_column(self, task_id_per_column(self.scene.terrain.terrain_generator))
+        self.scene.terrain.max_init_terrain_level = None
+
+        self.commands.base_velocity.ranges.lin_vel_x = (0.5, 0.5)
+        self.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
+        self.commands.base_velocity.ranges.ang_vel_z = (0.0, 0.0)
+        self.commands.base_velocity.rel_standing_envs = 0.0
+        self.commands.base_velocity.rel_zero_vel_envs = 0.0
+        self.commands.base_velocity.rel_only_lin_x_envs = 0.0
+        self.commands.base_velocity.rel_only_lin_y_envs = 0.0
+        self.commands.base_velocity.rel_only_ang_z_envs = 0.0
+
+
+@configclass
+class DeeproboticsM20StairsSightedV3bEnvCfg(DeeproboticsM20StairsSightedV3EnvCfg):
+    """v3 with the v2 wheel-clearance (stepping) reward restored.
+
+    v3 (run 2026-09-23_20-17-03) fixed heading drift but regressed ascent (0% at >= 0.25 m at
+    0.5 m/s, a run-up strategy that stalls when slow) -- with two confounded changes: the clearance
+    reward removed and yaw/heading tracking tightened. This keeps v3's heading changes and restores
+    only the clearance reward, to separate the two: if ascent recovers to v2 levels, the heading
+    fixes are free and the stepping reward was doing the work.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.rewards.stair_wheel_clearance = stair_wheel_clearance_term(
+            task_id_per_column(self.scene.terrain.terrain_generator)
+        )
+
+
+@configclass
+class DeeproboticsM20StairsSightedV3bEnvCfg_PLAY(DeeproboticsM20StairsSightedV3bEnvCfg):
+    """Play/video variant: fewer envs, no pushes, fixed forward command."""
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.scene.num_envs = 50
+        self.scene.env_spacing = 2.5
+        self.observations.policy.enable_corruption = False
+        self.events.randomize_push_robot = None
+
+        if self.scene.terrain.terrain_generator is not None:
             self.scene.terrain.terrain_generator.num_rows = 5
             self.scene.terrain.terrain_generator.num_cols = 8
             set_task_ids_per_column(self, task_id_per_column(self.scene.terrain.terrain_generator))

@@ -103,3 +103,51 @@ gym.register(
         "cusrl_cfg_entry_point": f"{agents.__name__}.cusrl_ppo_cfg:DeeproboticsM20RoughTrainerCfg",
     },
 )
+
+gym.register(
+    id="Stairs-Sighted-V3-Deeprobotics-M20-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        # Sighted spike v3: v2 + heading-hold reward/commands, no stepping reward. See
+        # `stairs_env_cfg.DeeproboticsM20StairsSightedV3EnvCfg`'s docstring.
+        "env_cfg_entry_point": f"{__name__}.stairs_env_cfg:DeeproboticsM20StairsSightedV3EnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:DeeproboticsM20StairsSightedV3PPORunnerCfg",
+        "cusrl_cfg_entry_point": f"{agents.__name__}.cusrl_ppo_cfg:DeeproboticsM20RoughTrainerCfg",
+    },
+)
+
+gym.register(
+    id="Stairs-Sighted-V3-Deeprobotics-M20-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.stairs_env_cfg:DeeproboticsM20StairsSightedV3EnvCfg_PLAY",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:DeeproboticsM20StairsSightedV3PPORunnerCfg",
+        "cusrl_cfg_entry_point": f"{agents.__name__}.cusrl_ppo_cfg:DeeproboticsM20RoughTrainerCfg",
+    },
+)
+
+gym.register(
+    id="Stairs-Sighted-V3b-Deeprobotics-M20-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        # v3 + the v2 wheel-clearance (stepping) reward restored. See
+        # `stairs_env_cfg.DeeproboticsM20StairsSightedV3bEnvCfg`'s docstring.
+        "env_cfg_entry_point": f"{__name__}.stairs_env_cfg:DeeproboticsM20StairsSightedV3bEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:DeeproboticsM20StairsSightedV3bPPORunnerCfg",
+        "cusrl_cfg_entry_point": f"{agents.__name__}.cusrl_ppo_cfg:DeeproboticsM20RoughTrainerCfg",
+    },
+)
+
+gym.register(
+    id="Stairs-Sighted-V3b-Deeprobotics-M20-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.stairs_env_cfg:DeeproboticsM20StairsSightedV3bEnvCfg_PLAY",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:DeeproboticsM20StairsSightedV3bPPORunnerCfg",
+        "cusrl_cfg_entry_point": f"{agents.__name__}.cusrl_ppo_cfg:DeeproboticsM20RoughTrainerCfg",
+    },
+)
