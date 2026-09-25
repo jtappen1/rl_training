@@ -65,7 +65,6 @@ import csv
 import glob
 import math
 import re
-from dataclasses import MISSING
 from datetime import datetime
 
 import gymnasium as gym
@@ -75,17 +74,19 @@ import torch
 import importlib.metadata as metadata
 from packaging import version
 
-from isaaclab.terrains import SubTerrainBaseCfg, TerrainGeneratorCfg
-from isaaclab.terrains.height_field.utils import convert_height_field_to_mesh
-from isaaclab.utils import configclass
-import trimesh
-
 from rsl_rl.runners import OnPolicyRunner
 
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
 from isaaclab_tasks.utils import load_cfg_from_registry
 
 import rl_training.tasks  # noqa: F401
+from rl_training.tasks.manager_based.locomotion.velocity.config.wheeled.deeprobotics_m20.eval_terrains import (
+    COURSE_WIDTH,
+    DEFAULT_COURSE,
+    START_X,
+    build_course_generator,
+    layout,
+)
 from rl_training.tasks.manager_based.locomotion.velocity.config.wheeled.deeprobotics_m20.stairs_env_cfg import (
     TASK_STAIR_ASCENT,
     set_task_ids_per_column,
@@ -93,133 +94,9 @@ from rl_training.tasks.manager_based.locomotion.velocity.config.wheeled.deeprobo
 
 installed_version = metadata.version("rsl-rl-lib")
 
-# ---------------------------------------------------------------------------
-# Course definition. Segments are laid end to end along +x, spanning the full course width.
-#   flat / landing: length            -- level ground (landing = top of a flight)
-#   ascent / descent: step_height, steps, tread
-#   slope: length, grade (+ up / - down)
-#   rough: length, max_height (random 0.1 m cells, like the training `random_rough`)
-# Every ascent is paired with a descent and every slope up with one down, so the course ends at
-# its starting height (level with the flat border around it).
-# ---------------------------------------------------------------------------
-DEFAULT_COURSE = [
-    dict(kind="flat", length=5.0),
-    dict(kind="ascent", step_height=0.10, steps=4, tread=0.30),
-    dict(kind="landing", length=2.0),
-    dict(kind="descent", step_height=0.10, steps=4, tread=0.30),
-    dict(kind="flat", length=2.5),
-    dict(kind="rough", length=4.0, max_height=0.05),
-    dict(kind="flat", length=2.0),
-    dict(kind="ascent", step_height=0.20, steps=5, tread=0.30),
-    dict(kind="landing", length=2.5),
-    dict(kind="descent", step_height=0.20, steps=5, tread=0.30),
-    dict(kind="flat", length=2.5),
-    dict(kind="slope", length=3.0, grade=0.25),
-    dict(kind="landing", length=2.0),
-    dict(kind="slope", length=3.0, grade=-0.25),
-    dict(kind="flat", length=2.0),
-    dict(kind="rough", length=4.0, max_height=0.10),
-    dict(kind="flat", length=2.0),
-    dict(kind="ascent", step_height=0.25, steps=5, tread=0.32),
-    dict(kind="landing", length=2.5),
-    dict(kind="descent", step_height=0.25, steps=5, tread=0.32),
-    dict(kind="flat", length=2.5),
-    dict(kind="ascent", step_height=0.30, steps=4, tread=0.32),
-    dict(kind="landing", length=2.5),
-    dict(kind="descent", step_height=0.30, steps=4, tread=0.35),
-    dict(kind="flat", length=5.0),
-]
-COURSE_WIDTH = 8.0
-START_X = 2.0  # robot root spawn, metres into the first flat segment
-HORIZONTAL_SCALE = 0.05
-VERTICAL_SCALE = 0.005
 FINISH_MARGIN = 2.5  # "finished" = root within this of the course end
 WHEEL_RADIUS = 0.09  # M20 wheel collision cylinder (urdf)
 STOPPED_RIM_SPEED = 0.1  # m/s; below this a planted wheel counts as stopped
-
-
-def segment_label(seg: dict) -> str:
-    k = seg["kind"]
-    if k in ("ascent", "descent"):
-        return f"{k} {seg['step_height']:.2f} m x{seg['steps']}"
-    if k == "slope":
-        return f"slope {'up' if seg['grade'] > 0 else 'down'} {abs(seg['grade']):.2f}"
-    if k == "rough":
-        return f"rough {seg['max_height']:.2f} m"
-    return k
-
-
-def segment_length(seg: dict) -> float:
-    if seg["kind"] in ("ascent", "descent"):
-        return seg["steps"] * seg["tread"]
-    return seg["length"]
-
-
-def layout(course: list[dict]) -> list[dict]:
-    """Absolute x-extent and start/end heights of every segment."""
-    out, x, z = [], 0.0, 0.0
-    for seg in course:
-        length = segment_length(seg)
-        dz = 0.0
-        if seg["kind"] == "ascent":
-            dz = seg["steps"] * seg["step_height"]
-        elif seg["kind"] == "descent":
-            dz = -seg["steps"] * seg["step_height"]
-        elif seg["kind"] == "slope":
-            dz = seg["grade"] * length
-        out.append({**seg, "label": segment_label(seg), "x0": x, "x1": x + length, "z0": z, "z1": z + dz})
-        x, z = x + length, z + dz
-    return out
-
-
-def course_terrain(difficulty: float, cfg: "CourseTerrainCfg"):
-    """Sub-terrain function: the whole course as one height field -> trimesh."""
-    segs = layout(cfg.course)
-    length, width = cfg.size
-    hs, vs = HORIZONTAL_SCALE, VERTICAL_SCALE
-    nx, ny = int(length / hs) + 1, int(width / hs) + 1
-    xs = np.arange(nx) * hs
-    heights = np.zeros((nx, ny))
-    rng = np.random.default_rng(cfg.seed)
-    for seg in segs:
-        m = (xs >= seg["x0"]) & (xs < seg["x1"])
-        if not m.any():
-            continue
-        local = xs[m] - seg["x0"]
-        k = seg["kind"]
-        if k in ("flat", "landing"):
-            prof = np.full(local.shape, seg["z0"])
-        elif k in ("ascent", "descent"):
-            sign = 1.0 if k == "ascent" else -1.0
-            step_idx = np.floor(local / seg["tread"] + 1e-9) + 1  # first tread is already one step up/down
-            prof = seg["z0"] + sign * seg["step_height"] * step_idx
-        elif k == "slope":
-            prof = seg["z0"] + seg["grade"] * local
-        elif k == "rough":
-            prof = np.full(local.shape, seg["z0"])
-        else:
-            raise ValueError(f"unknown segment kind {k}")
-        heights[m, :] = prof[:, None]
-        if k == "rough":
-            cell = int(round(0.1 / hs))
-            cx, cy = int(np.ceil(m.sum() / cell)), int(np.ceil(ny / cell))
-            levels = np.arange(0.0, seg["max_height"] + 1e-9, 0.02)
-            noise = rng.choice(levels, size=(cx, cy))
-            noise = np.kron(noise, np.ones((cell, cell)))[: m.sum(), :ny]
-            heights[m, :] += noise
-    hf = np.round(heights / vs).astype(np.int16)
-    vertices, triangles = convert_height_field_to_mesh(hf, hs, vs, cfg.slope_threshold)
-    mesh = trimesh.Trimesh(vertices=vertices, faces=triangles)
-    origin = np.array([START_X, width / 2.0, 0.0])
-    return [mesh], origin
-
-
-@configclass
-class CourseTerrainCfg(SubTerrainBaseCfg):
-    function = course_terrain
-    course: list = MISSING
-    slope_threshold: float = 0.75
-    seed: int = 0
 
 
 def resolve_checkpoint(path: str) -> str:
@@ -246,18 +123,7 @@ def build_env_cfg(course_len: float, time_budget: float):
     env_cfg.seed = args_cli.seed
     env_cfg.episode_length_s = time_budget + 5.0
 
-    env_cfg.scene.terrain.terrain_generator = TerrainGeneratorCfg(
-        size=(course_len, COURSE_WIDTH),
-        border_width=6.0,
-        num_rows=1,
-        num_cols=1,
-        horizontal_scale=HORIZONTAL_SCALE,
-        vertical_scale=VERTICAL_SCALE,
-        slope_threshold=0.75,
-        use_cache=False,
-        curriculum=True,
-        sub_terrains={"course": CourseTerrainCfg(proportion=1.0, course=DEFAULT_COURSE, seed=args_cli.seed)},
-    )
+    env_cfg.scene.terrain.terrain_generator = build_course_generator(DEFAULT_COURSE, args_cli.seed)
     env_cfg.scene.terrain.max_init_terrain_level = 0
     for name in ("terrain_levels", "gait_level", "command_levels", "terrain_level_flat_rough",
                  "terrain_level_stair_ascent", "terrain_level_stair_descent"):

@@ -92,16 +92,12 @@ simulation_app = app_launcher.app
 import csv
 import math
 import glob
-import itertools
 import re
-from collections import OrderedDict, defaultdict
+from collections import defaultdict
 from datetime import datetime
 
 import gymnasium as gym
 import torch
-
-import isaaclab.terrains as terrain_gen
-from isaaclab.terrains import TerrainGeneratorCfg
 
 import importlib.metadata as metadata
 from packaging import version
@@ -120,29 +116,24 @@ from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
 from isaaclab_tasks.utils import load_cfg_from_registry
 
 import rl_training.tasks  # noqa: F401
+from rl_training.tasks.manager_based.locomotion.velocity.config.wheeled.deeprobotics_m20.eval_terrains import (  # noqa: E402
+    PLATFORM_WIDTH,
+    SUB_BORDER_WIDTH,
+    TILE_SIZE,
+    build_combos,
+    build_stairs_benchmark_generator,
+    num_stairs_steps,
+)
 from rl_training.tasks.manager_based.locomotion.velocity.config.wheeled.deeprobotics_m20.stairs_env_cfg import (  # noqa: E402
     TASK_STAIR_ASCENT,
     TASK_STAIR_DESCENT,
     set_task_ids_per_column,
 )
 
-# ---------------------------------------------------------------------------
-# Fixed evaluation-terrain geometry.
-#
-# These mirror the values ROUGH_TERRAINS_CFG already uses for its pyramid_stairs /
-# pyramid_stairs_inv sub-terrains (isaaclab/terrains/config/rough.py), so the eval tiles are the
-# same "shape" of stairs the blind policy has already seen during training -- only the step
-# height/tread width are pinned to exact values instead of being difficulty-sampled.
-# ---------------------------------------------------------------------------
-TILE_SIZE = 8.0
-PLATFORM_WIDTH = 2.5
-SUB_BORDER_WIDTH = 1.0
-GEN_BORDER_WIDTH = 4.0
 # Extra clearance past the last riser so the whole ~0.82 m-long M20 body (not just the root) has
 # cleared the stairs before we call it a crossing.
 ROBOT_LENGTH_MARGIN = 0.3
 
-DIRECTIONS = ("ascent", "descent")
 # Front wheel axle is ~0.4 m ahead of the root on the 0.82 m-long M20.
 FRONT_WHEEL_OFFSET = 0.4
 
@@ -171,59 +162,6 @@ def resolve_checkpoint(path: str) -> str:
     return max(candidates, key=_iteration)
 
 
-def num_stairs_steps(step_width: float) -> int:
-    """Mirror the step count formula in isaaclab's pyramid_stairs_terrain / inverted_pyramid_stairs_terrain."""
-    usable = TILE_SIZE - 2 * SUB_BORDER_WIDTH - PLATFORM_WIDTH
-    return int(usable // (2 * step_width) + 1)
-
-
-def build_combos(step_heights, tread_widths):
-    combos = []
-    for direction, height, width in itertools.product(DIRECTIONS, step_heights, tread_widths):
-        combos.append({"direction": direction, "step_height": height, "tread_width": width})
-    return combos
-
-
-def build_terrain_generator(combos: list[dict]) -> TerrainGeneratorCfg:
-    """One sub-terrain per combo, equal proportion, one difficulty row.
-
-    With `curriculum=True` and equal proportions, `TerrainGenerator._generate_curriculum_terrains`
-    assigns column `i` to `list(sub_terrains.values())[i]` (see terrain_generator.py) -- so combo
-    order here is exactly the column order the terrain importer later hands back as
-    `terrain.terrain_types`. `step_height_range=(h, h)` makes the per-row difficulty jitter a
-    no-op for pyramid_stairs (only step height depends on difficulty; see mesh_terrains.py), so a
-    single row (no promotion to chase) is safe.
-    """
-    sub_terrains = OrderedDict()
-    for i, combo in enumerate(combos):
-        cls = (
-            terrain_gen.MeshInvertedPyramidStairsTerrainCfg
-            if combo["direction"] == "ascent"
-            else terrain_gen.MeshPyramidStairsTerrainCfg
-        )
-        key = f"{i:03d}_{combo['direction']}_h{combo['step_height']:.2f}_w{combo['tread_width']:.2f}"
-        sub_terrains[key] = cls(
-            proportion=1.0,
-            step_height_range=(combo["step_height"], combo["step_height"]),
-            step_width=combo["tread_width"],
-            platform_width=PLATFORM_WIDTH,
-            border_width=SUB_BORDER_WIDTH,
-            holes=False,
-        )
-    return TerrainGeneratorCfg(
-        size=(TILE_SIZE, TILE_SIZE),
-        border_width=GEN_BORDER_WIDTH,
-        num_rows=1,
-        num_cols=len(combos),
-        horizontal_scale=0.1,
-        vertical_scale=0.005,
-        slope_threshold=0.75,
-        use_cache=False,
-        curriculum=True,
-        sub_terrains=sub_terrains,
-    )
-
-
 def build_env_cfg(combos: list[dict]) -> object:
     """Start from `--task`'s own registered env cfg and swap in the eval terrain + fixed command.
 
@@ -241,7 +179,7 @@ def build_env_cfg(combos: list[dict]) -> object:
 
     # ---- fixed evaluation terrain (replaces the training terrain generator instance; does not
     # mutate any shared object, per command.md's ground rules) ----
-    env_cfg.scene.terrain.terrain_generator = build_terrain_generator(combos)
+    env_cfg.scene.terrain.terrain_generator = build_stairs_benchmark_generator(combos)
     env_cfg.scene.terrain.max_init_terrain_level = 0
 
     # single-row terrain has no difficulty levels to promote/demote through. Covers both the
