@@ -12,6 +12,8 @@ plumbing from Phase 4's architecture changes.
 
 from __future__ import annotations
 
+import copy
+
 import torch
 
 import isaaclab.terrains as terrain_gen
@@ -19,7 +21,9 @@ from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
+from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import TerminationTermCfg as DoneTerm
+from isaaclab.sensors import RayCasterCameraCfg, patterns
 from isaaclab.terrains import TerrainGeneratorCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
@@ -684,6 +688,139 @@ class DeeproboticsM20StairsSightedV3bEnvCfg_PLAY(DeeproboticsM20StairsSightedV3b
         self.scene.num_envs = 50
         self.scene.env_spacing = 2.5
         self.observations.policy.enable_corruption = False
+        self.events.randomize_push_robot = None
+
+        if self.scene.terrain.terrain_generator is not None:
+            self.scene.terrain.terrain_generator.num_rows = 5
+            self.scene.terrain.terrain_generator.num_cols = 8
+            set_task_ids_per_column(self, task_id_per_column(self.scene.terrain.terrain_generator))
+        self.scene.terrain.max_init_terrain_level = None
+
+        self.commands.base_velocity.ranges.lin_vel_x = (0.5, 0.5)
+        self.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
+        self.commands.base_velocity.ranges.ang_vel_z = (0.0, 0.0)
+        self.commands.base_velocity.rel_standing_envs = 0.0
+        self.commands.base_velocity.rel_zero_vel_envs = 0.0
+        self.commands.base_velocity.rel_only_lin_x_envs = 0.0
+        self.commands.base_velocity.rel_only_lin_y_envs = 0.0
+        self.commands.base_velocity.rel_only_ang_z_envs = 0.0
+
+
+##
+# Student (Milestone B, sequential distillation from a frozen teacher; 2026-09-24)
+##
+
+# Depth camera placeholder -- REPLACE with the real mount once the sensor is chosen (command.md
+# Phase 5, [ASK HUMAN]). Front of the body, pitched down so the image covers ~0.2-2.6 m of ground
+# ahead from the M20's standing height. Intrinsics approximate an Intel RealSense D435 depth stream
+# (~87 x 56 deg FOV) at a policy-sized 64 x 36 resolution, updated at 10 Hz.
+STUDENT_CAMERA_POS = (0.38, 0.0, 0.05)  # m, in base_link
+STUDENT_CAMERA_PITCH_DOWN_DEG = 40.0
+STUDENT_CAMERA_WIDTH, STUDENT_CAMERA_HEIGHT = 64, 36
+STUDENT_CAMERA_FOCAL, STUDENT_CAMERA_H_APERTURE = 11.04, 20.955  # -> ~87 deg horizontal FOV
+STUDENT_CAMERA_UPDATE_PERIOD = 0.1  # s
+STUDENT_DEPTH_NEAR, STUDENT_DEPTH_FAR = 0.1, 2.5  # m
+
+
+def _pitch_down_quat(deg: float) -> tuple[float, float, float, float]:
+    """(w, x, y, z) rotation about +Y (world convention: +X forward, +Z up) -> tilts +X toward -Z."""
+    import math
+
+    half = math.radians(deg) / 2.0
+    return (math.cos(half), 0.0, math.sin(half), 0.0)
+
+
+def add_depth_camera(env_cfg, noisy: bool = True) -> None:
+    """Add the student's front depth camera (`scene.depth_camera`) and its `depth` observation group.
+
+    `depth` is a (N, 1, H, W) image in [0, 1] from `mdp.depth_image`; with `noisy=False` the noise
+    model, latency and frame drops are off. Adding the group doesn't change what a PPO policy reads
+    (its runner only routes `policy`/`critic`), so height-scan policies can run with it attached.
+    """
+    env_cfg.scene.depth_camera = RayCasterCameraCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/" + env_cfg.base_link_name,
+        mesh_prim_paths=["/World/ground"],
+        update_period=STUDENT_CAMERA_UPDATE_PERIOD,
+        offset=RayCasterCameraCfg.OffsetCfg(
+            pos=STUDENT_CAMERA_POS, rot=_pitch_down_quat(STUDENT_CAMERA_PITCH_DOWN_DEG), convention="world"
+        ),
+        data_types=["distance_to_image_plane"],
+        depth_clipping_behavior="max",
+        max_distance=STUDENT_DEPTH_FAR,
+        pattern_cfg=patterns.PinholeCameraPatternCfg(
+            focal_length=STUDENT_CAMERA_FOCAL,
+            horizontal_aperture=STUDENT_CAMERA_H_APERTURE,
+            width=STUDENT_CAMERA_WIDTH,
+            height=STUDENT_CAMERA_HEIGHT,
+        ),
+        debug_vis=False,
+    )
+
+    env_cfg.observations.depth = ObsGroup()
+    env_cfg.observations.depth.depth_image = ObsTerm(
+        func=mdp.depth_image,
+        params={
+            "sensor_cfg": SceneEntityCfg("depth_camera"),
+            "near": STUDENT_DEPTH_NEAR,
+            "far": STUDENT_DEPTH_FAR,
+            "group_name": "depth",
+            "noise_rel_std": 0.01,
+            "dropout_range": (0.0, 0.05),
+            "hole_prob": 0.1,
+            "hole_max_frac": 0.25,
+            "edge_threshold": 0.1,
+            "edge_drop_prob": 0.3,
+            "latency_steps_range": (0, 2),
+            "frame_drop_prob": 0.05,
+        },
+    )
+    env_cfg.observations.depth.concatenate_terms = True
+    env_cfg.observations.depth.enable_corruption = noisy
+
+
+@configclass
+class DeeproboticsM20StairsStudentEnvCfg(DeeproboticsM20StairsSightedV2EnvCfg):
+    """Depth student env for sequential (DAgger-style) distillation from a frozen sighted teacher.
+
+    Same terrain, commands, curriculum and rewards as the teacher's env (v2 -- the teacher checkpoint
+    is `deeprobotics_m20_stairs_sighted_v2/2026-09-23_15-04-55/model_5300.pt`; to distil from v3b
+    instead, change the parent class and the checkpoint together). Observation groups:
+
+    - `teacher`: exact, noise-free copy of the v2 `policy` group (proprioception + height scan, same
+      terms / order / scales -> 288 dims), so the frozen PPO actor loads strictly and sees what it
+      was trained on;
+    - `policy`: the student's proprioception = v2 `policy` minus the height scan (keeps its noise);
+    - `depth`: (N, 1, 36, 64) depth image from a front ray-cast camera, with the noise model in
+      `mdp.depth_image` while `enable_corruption` is on;
+    - `critic`: unchanged (unused by distillation).
+
+    Distillation runner/model config is not defined here (see `docs/student_distillation_setup.md`).
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        add_depth_camera(self)
+
+        # ------------------------------ Observation groups ------------------------------
+        teacher = copy.deepcopy(self.observations.policy)
+        teacher.enable_corruption = False
+        self.observations.teacher = teacher
+
+        self.observations.policy.height_scan = None
+
+
+@configclass
+class DeeproboticsM20StairsStudentEnvCfg_PLAY(DeeproboticsM20StairsStudentEnvCfg):
+    """Play/video variant: fewer envs, no pushes, fixed forward command, clean depth."""
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.scene.num_envs = 50
+        self.scene.env_spacing = 2.5
+        self.observations.policy.enable_corruption = False
+        self.observations.depth.enable_corruption = False
         self.events.randomize_push_robot = None
 
         if self.scene.terrain.terrain_generator is not None:
