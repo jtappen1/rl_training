@@ -35,6 +35,71 @@ gym.register(
 )
 
 gym.register(
+    id="Skatepark-Deeprobotics-M20-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.skatepark_env_cfg:DeeproboticsM20SkateparkEnvCfg",
+        # reuses the Rough runner cfg (same experiment_name/log dir) so `play.py` finds the
+        # already-trained checkpoint under logs/rsl_rl/deeprobotics_m20_rough automatically.
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:DeeproboticsM20RoughPPORunnerCfg",
+        "cusrl_cfg_entry_point": f"{agents.__name__}.cusrl_ppo_cfg:DeeproboticsM20RoughTrainerCfg",
+    },
+)
+
+gym.register(
+    id="Skatepark-Deeprobotics-M20-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        # keyboard-driving variant; see `skatepark_env_cfg.DeeproboticsM20SkateparkEnvCfg_PLAY`
+        "env_cfg_entry_point": f"{__name__}.skatepark_env_cfg:DeeproboticsM20SkateparkEnvCfg_PLAY",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:DeeproboticsM20RoughPPORunnerCfg",
+        "cusrl_cfg_entry_point": f"{agents.__name__}.cusrl_ppo_cfg:DeeproboticsM20RoughTrainerCfg",
+    },
+)
+
+gym.register(
+    id="Skatepark-V3b-Deeprobotics-M20-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        # keyboard-driving the sighted stairs v3b policy; see
+        # `skatepark_env_cfg.DeeproboticsM20SkateparkV3bEnvCfg_PLAY`. Uses the v3b runner cfg so
+        # `play.py` finds the latest checkpoint under logs/rsl_rl/deeprobotics_m20_stairs_sighted_v3b.
+        "env_cfg_entry_point": f"{__name__}.skatepark_env_cfg:DeeproboticsM20SkateparkV3bEnvCfg_PLAY",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:DeeproboticsM20StairsSightedV3bPPORunnerCfg",
+        "cusrl_cfg_entry_point": f"{agents.__name__}.cusrl_ppo_cfg:DeeproboticsM20RoughTrainerCfg",
+    },
+)
+
+gym.register(
+    id="Stairs-Bench-V3b-Deeprobotics-M20-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        # keyboard-driving v3b on the eval_stairs.py benchmark tiles (+ clean depth camera); see
+        # `eval_play_env_cfg.DeeproboticsM20StairsBenchV3bEnvCfg_PLAY`
+        "env_cfg_entry_point": f"{__name__}.eval_play_env_cfg:DeeproboticsM20StairsBenchV3bEnvCfg_PLAY",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:DeeproboticsM20StairsSightedV3bPPORunnerCfg",
+        "cusrl_cfg_entry_point": f"{agents.__name__}.cusrl_ppo_cfg:DeeproboticsM20RoughTrainerCfg",
+    },
+)
+
+gym.register(
+    id="Course-V3b-Deeprobotics-M20-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        # keyboard-driving v3b on the eval_multi_terrain_course.py course (+ clean depth camera); see
+        # `eval_play_env_cfg.DeeproboticsM20CourseV3bEnvCfg_PLAY`
+        "env_cfg_entry_point": f"{__name__}.eval_play_env_cfg:DeeproboticsM20CourseV3bEnvCfg_PLAY",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:DeeproboticsM20StairsSightedV3bPPORunnerCfg",
+        "cusrl_cfg_entry_point": f"{agents.__name__}.cusrl_ppo_cfg:DeeproboticsM20RoughTrainerCfg",
+    },
+)
+
+gym.register(
     id="Stairs-Teacher-Deeprobotics-M20-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,
