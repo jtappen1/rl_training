@@ -47,6 +47,28 @@ def terrain_levels_vel(
     return mean_level
 
 
+def terrain_level_by_task(
+    env: ManagerBasedRLEnv, env_ids: Sequence[int], task_ids_per_column: Sequence[int], task_id: int
+) -> torch.Tensor:
+    """Mean terrain level among live envs whose (fixed) terrain column maps to `task_id`.
+
+    Logging-only decomposition of `terrain_levels_vel`'s aggregate mean -- it does not call
+    `terrain.update_env_origins` itself (the `terrain_levels` term already promotes/demotes every
+    env each step, keyed by that env's own fixed column). Each env's terrain level already
+    progresses independently of every other env's, so the underlying curriculum is not coupled
+    across tasks; only the single aggregate mean logged by `terrain_levels_vel` was hiding
+    per-task asymmetry (see command.md Phase 3.3 and `docs/stairs_research_notes.md` sec 9,
+    motivated by Phase 1's baseline finding that ascent and descent are very different
+    difficulties for this robot).
+    """
+    terrain: TerrainImporter = env.scene.terrain
+    task_of_column = torch.tensor(task_ids_per_column, device=env.device, dtype=torch.long)
+    mask = task_of_column[terrain.terrain_types] == task_id
+    if not torch.any(mask):
+        return torch.tensor(float("nan"), device=env.device)
+    return torch.mean(terrain.terrain_levels[mask].float())
+
+
 def gait_level_curve(env: ManagerBasedRLEnv, env_ids: Sequence[int]) -> torch.Tensor:
     """Return current global gait_level for logging in curriculum curves."""
     from .rewards import gait_level

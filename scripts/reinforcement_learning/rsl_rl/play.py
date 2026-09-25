@@ -187,7 +187,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # spawn the robot randomly in the grid (instead of their terrain levels)
     # reduce the number of terrains to save memory
-    if env_cfg.scene.terrain.terrain_generator is not None:
+    # (tasks with a fixed eval terrain set `keep_play_terrain` to opt out)
+    if env_cfg.scene.terrain.terrain_generator is not None and not getattr(env_cfg, "keep_play_terrain", False):
         env_cfg.scene.terrain.terrain_generator.num_rows = 5
         env_cfg.scene.terrain.terrain_generator.num_cols = 5
         env_cfg.scene.terrain.terrain_generator.curriculum = False
@@ -212,9 +213,37 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             omega_z_sensitivity=env_cfg.commands.base_velocity.ranges.ang_vel_z[1],
         )
         controller = Se2Keyboard(config)
-        env_cfg.observations.policy.velocity_commands = ObsTerm(
-            func=lambda env: torch.tensor(controller.advance(), dtype=torch.float32).unsqueeze(0).to(env.device),
-        )
+
+        # +/- scale the linear (x, y) step of the arrow keys; yaw rate is left alone
+        speed = {"scale": 1.0}
+
+        def change_speed(delta):
+            speed["scale"] = min(max(speed["scale"] + delta, 0.25), 3.0)
+            print(f"[KEYBOARD] speed x{speed['scale']:.2f} -> forward {config.v_x_sensitivity * speed['scale']:.2f} m/s")
+
+        for key in ("EQUAL", "NUMPAD_ADD"):
+            controller.add_callback(key, lambda: change_speed(0.25))
+        for key in ("MINUS", "NUMPAD_SUBTRACT"):
+            controller.add_callback(key, lambda: change_speed(-0.25))
+        # N / B: respawn on the next / previous terrain tile (applied in the play loop)
+        tile = {"idx": 0, "pending": False}
+
+        def change_tile(delta):
+            tile["idx"] += delta
+            tile["pending"] = True
+
+        controller.add_callback("N", lambda: change_tile(1))
+        controller.add_callback("B", lambda: change_tile(-1))
+        print(controller)
+        print("\tFaster / slower (linear):    = or Numpad + / - or Numpad -")
+        print("\tNext / previous tile:        N / B")
+
+        def keyboard_command(env):
+            cmd = controller.advance().clone().float()
+            cmd[:2] *= speed["scale"]
+            return cmd.unsqueeze(0).to(env.device)
+
+        env_cfg.observations.policy.velocity_commands = ObsTerm(func=keyboard_command)
 
     # specify directory for logging experiments
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
@@ -377,10 +406,52 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # reset environment
     obs, _ = env.reset()
 
+    # on-screen readout of the keyboard speed scale, command and measured forward speed, plus the
+    # `depth` observation image when the task has one
+    speed_label = None
+    depth_provider = None
+    tile_names = None
+    if args_cli.keyboard:
+        terrain = env.unwrapped.scene.terrain
+        terrain_gen_cfg = terrain.cfg.terrain_generator
+        if terrain_gen_cfg is not None and terrain.terrain_origins is not None:
+            sub_names = list(terrain_gen_cfg.sub_terrains.keys())
+            num_cols = terrain.terrain_origins.shape[1]
+            tile_names = [sub_names[c] if num_cols == len(sub_names) else f"col {c}" for c in range(num_cols)]
+        has_depth = "depth" in obs.keys()
+        try:
+            import omni.ui as ui
+
+            speed_window = ui.Window("Keyboard drive", width=340, height=320 if has_depth else 110)
+            with speed_window.frame:
+                with ui.VStack(spacing=4):
+                    speed_label = ui.Label("", style={"font_size": 20}, word_wrap=True, height=0)
+                    if has_depth:
+                        _, _, depth_h, depth_w = obs["depth"].shape
+                        depth_provider = ui.ByteImageProvider()
+                        ui.ImageWithProvider(depth_provider, width=depth_w * 5, height=depth_h * 5)
+        except Exception as e:
+            print(f"[WARN] Could not create speed overlay window: {e}")
+
     timestep = 0
+    ui_step = 0
     # simulate environment
     while simulation_app.is_running():
         start_time = time.time()
+        if args_cli.keyboard and tile["pending"]:
+            tile["pending"] = False
+            if tile_names is None:
+                print("[KEYBOARD] this terrain has no tiles to switch between")
+            else:
+                terrain = env.unwrapped.scene.terrain
+                num_rows, num_cols = terrain.terrain_origins.shape[:2]
+                i = tile["idx"] % (num_rows * num_cols)
+                row, col = divmod(i, num_cols)
+                terrain.env_origins[0] = terrain.terrain_origins[row, col]
+                terrain.terrain_levels[0] = row
+                terrain.terrain_types[0] = col
+                obs, _ = env.reset()
+                print(f"[KEYBOARD] tile {i + 1}/{num_rows * num_cols}: row {row}, {tile_names[col]}")
         # run everything in inference mode
         with torch.inference_mode():
             # agent stepping
@@ -475,6 +546,25 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
         if args_cli.keyboard:
             camera_follow(env)
+            if speed_label is not None:
+                cmd = keyboard_command(env.unwrapped)[0]
+                vel = env.unwrapped.scene["robot"].data.root_lin_vel_b[0]
+                speed_label.text = (
+                    f"Speed x{speed['scale']:.2f}  (= faster, - slower)\n"
+                    f"cmd  vx {cmd[0]:+.2f}  vy {cmd[1]:+.2f} m/s  wz {cmd[2]:+.2f} rad/s\n"
+                    f"base vx {vel[0]:+.2f}  vy {vel[1]:+.2f} m/s"
+                )
+            if depth_provider is not None and ui_step % 5 == 0:
+                # near = dark, far = bright, invalid (0) = red
+                d = obs["depth"][0, 0]
+                gray = (d.clamp(0.0, 1.0) * 255).to(torch.uint8)
+                invalid = d <= 0
+                rgba = torch.stack(
+                    [torch.where(invalid, 255, gray), torch.where(invalid, 0, gray),
+                     torch.where(invalid, 0, gray), torch.full_like(gray, 255)], dim=-1
+                ).to(torch.uint8)
+                depth_provider.set_bytes_data(rgba.flatten().tolist(), [d.shape[1], d.shape[0]])
+            ui_step += 1
 
         # time delay for real-time evaluation
         sleep_time = dt - (time.time() - start_time)
