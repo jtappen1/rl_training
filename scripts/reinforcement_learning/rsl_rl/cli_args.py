@@ -109,6 +109,14 @@ def convert_rsl_rl_cfg_dict(cfg_dict: dict) -> dict:
     Returns:
         The converted config dict compatible with rsl-rl v5+.
     """
+    # Distillation student/teacher model cfgs: `RslRlMLPModelCfg.to_dict()` still emits these
+    # deprecated keys, and rsl-rl passes the model cfg straight to the constructor as **kwargs.
+    for name in ("student", "teacher"):
+        model_cfg = cfg_dict.get(name)
+        if isinstance(model_cfg, dict):
+            for key in ("stochastic", "init_noise_std", "noise_std_type", "state_dependent_std"):
+                model_cfg.pop(key, None)
+
     if cfg_dict.get("actor") and cfg_dict.get("critic"):
         # Already in new format. `RslRlOnPolicyRunnerCfg` carries both the legacy `policy` field
         # (which every runner cfg in this repo actually populates) and newer `actor`/`critic`
