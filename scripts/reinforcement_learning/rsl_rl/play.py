@@ -285,22 +285,36 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
     # load previously trained model
     # convert config to dict and create runner
-    train_cfg = agent_cfg.to_dict()
-    if version.parse(installed_version) >= version.parse("5.0.0"):
-        train_cfg = cli_args.convert_rsl_rl_cfg_dict(train_cfg)
-    runner_class = resolve_callable(runner_class_name) if is_custom_runner else OnPolicyRunner
-    ppo_runner = runner_class(env, train_cfg, log_dir=None, device=agent_cfg.device)
-    ppo_runner.load(resume_path)
-
-    # obtain the trained policy for inference
-    policy = ppo_runner.get_inference_policy(device=env.unwrapped.device)
+    if is_custom_runner:
+        train_cfg = agent_cfg.to_dict()
+        if version.parse(installed_version) >= version.parse("5.0.0"):
+            train_cfg = cli_args.convert_rsl_rl_cfg_dict(train_cfg)
+        ppo_runner = resolve_callable(runner_class_name)(env, train_cfg, log_dir=None, device=agent_cfg.device)
+        ppo_runner.load(resume_path)
+        # obtain the trained policy for inference
+        policy = ppo_runner.get_inference_policy(device=env.unwrapped.device)
+    else:
+        # PPO or distillation (student) policy; may be recurrent -> reset on dones below
+        ppo_runner, policy = cli_args.load_inference_policy(env, agent_cfg, resume_path)
+    # custom (AMP) runners may return a plain callable
+    policy_reset = getattr(policy, "reset", lambda *args, **kwargs: None)
 
     export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
 
     if version.parse(installed_version) >= version.parse("4.0.0"):
-        # Use runner-native exporters for rsl-rl >= 4.0.0
-        ppo_runner.export_policy_to_jit(path=export_model_dir, filename="policy.pt")
-        ppo_runner.export_policy_to_onnx(path=export_model_dir, filename="policy.onnx")
+        # Use runner-native exporters for rsl-rl >= 4.0.0. rsl-rl's CNNModel exporters drop any
+        # recurrent layer a subclass adds (e.g. the CNN+GRU depth student): JIT would silently save
+        # a wrong model and ONNX fails. Skip those until the model has its own exporters.
+        from rsl_rl.models import CNNModel
+
+        if isinstance(policy, CNNModel) and getattr(policy, "is_recurrent", False):
+            print(f"[WARN] Policy export skipped: {type(policy).__name__} has no recurrent-aware exporter yet.")
+        else:
+            try:
+                ppo_runner.export_policy_to_jit(path=export_model_dir, filename="policy.pt")
+                ppo_runner.export_policy_to_onnx(path=export_model_dir, filename="policy.onnx")
+            except Exception as e:
+                print(f"[WARN] Policy export skipped ({type(e).__name__}: {e})")
         policy_nn = None
     else:
         # Fallback for rsl-rl < 4.0.0
@@ -451,6 +465,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 terrain.terrain_levels[0] = row
                 terrain.terrain_types[0] = col
                 obs, _ = env.reset()
+                policy_reset()
                 print(f"[KEYBOARD] tile {i + 1}/{num_rows * num_cols}: row {row}, {tile_names[col]}")
         # run everything in inference mode
         with torch.inference_mode():
@@ -458,7 +473,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             actions = policy(obs)
 
             # env stepping
-            obs, _, _, _ = env.step(actions)
+            obs, _, dones, _ = env.step(actions)
+            policy_reset(dones)  # clear recurrent state of envs that just reset (no-op for MLPs)
 
         # ----- Draw foot trajectories -----
         if VIS_ENABLED and draw_interface and foot_ids and act_hist and cmd_hist:

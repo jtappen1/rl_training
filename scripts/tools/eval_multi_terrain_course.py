@@ -37,6 +37,10 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "r
 import cli_args  # noqa: E402
 
 parser = argparse.ArgumentParser(description="Multi-terrain straight-line course eval for an M20 checkpoint.")
+parser.add_argument(
+    "--clean_depth", action="store_true",
+    help="Depth-student tasks: turn off the depth noise / latency / frame drops (default: as trained).",
+)
 parser.add_argument("--checkpoint", type=str, required=True, help="model_*.pt, or a run dir (latest checkpoint used).")
 parser.add_argument("--task", type=str, default="Stairs-Sighted-V2-Deeprobotics-M20-v0")
 parser.add_argument("--speed", type=float, default=0.7, help="Fixed forward command (m/s).")
@@ -74,7 +78,6 @@ import torch
 import importlib.metadata as metadata
 from packaging import version
 
-from rsl_rl.runners import OnPolicyRunner
 
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
 from isaaclab_tasks.utils import load_cfg_from_registry
@@ -160,6 +163,8 @@ def build_env_cfg(course_len: float, time_budget: float):
     cmd.debug_vis = False
 
     env_cfg.observations.policy.enable_corruption = False
+    if args_cli.clean_depth and hasattr(env_cfg.observations, "depth"):
+        env_cfg.observations.depth.enable_corruption = False
 
     env_cfg.viewer.origin_type = "asset_root"
     env_cfg.viewer.asset_name = "robot"
@@ -260,14 +265,8 @@ def main():
         env = overlay
 
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
-    train_cfg = agent_cfg.to_dict()
-    train_cfg.pop("actor", None)
-    train_cfg.pop("critic", None)
-    if version.parse(installed_version) >= version.parse("5.0.0"):
-        train_cfg = cli_args.convert_rsl_rl_cfg_dict(train_cfg)
-    runner = OnPolicyRunner(env, train_cfg, log_dir=None, device=agent_cfg.device)
-    runner.load(checkpoint)
-    policy = runner.get_inference_policy(device=env.unwrapped.device)
+    # PPO actor or distillation student (possibly recurrent; single env, the run ends on its first done)
+    _, policy = cli_args.load_inference_policy(env, agent_cfg, checkpoint)
 
     base_env = env.unwrapped
     robot = base_env.scene["robot"]
@@ -285,6 +284,7 @@ def main():
     dt = base_env.step_dt
 
     obs, _ = env.reset()
+    policy.reset()
     origin = base_env.scene.env_origins[0].clone()
     yaw0 = _yaw(robot.data.root_quat_w)[0].item()
 
