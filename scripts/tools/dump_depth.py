@@ -26,7 +26,7 @@ parser = argparse.ArgumentParser(description="Dump student depth frames while th
 parser.add_argument("--task", type=str, default="Stairs-Student-Deeprobotics-M20-v0")
 parser.add_argument(
     "--teacher", type=str,
-    default="logs/rsl_rl/deeprobotics_m20_stairs_sighted_v2/2026-09-23_15-04-55/model_5300.pt",
+    default="logs/rsl_rl/deeprobotics_m20_stairs_sighted_v3b/2026-09-24_02-44-54/model_5999.pt",
 )
 parser.add_argument("--num_envs", type=int, default=16)
 parser.add_argument("--steps", type=int, default=150, help="Policy steps before dumping (50 Hz).")
@@ -49,7 +49,7 @@ import rl_training.tasks  # noqa: F401
 
 
 def teacher_model(obs, checkpoint: str) -> MLPModel:
-    """The v2 PPO actor, rebuilt as rsl-rl builds it (see cli_args.convert_rsl_rl_cfg_dict)."""
+    """The sighted (v3b) PPO actor, rebuilt as rsl-rl builds it (see cli_args.convert_rsl_rl_cfg_dict)."""
     model = MLPModel(
         obs,
         {"teacher": ["teacher"]},
