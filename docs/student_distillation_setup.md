@@ -30,7 +30,7 @@ Observation groups produced by the env (shapes verified with 16 envs):
 
 **Why custom:** RSL-RL 5.0.1 has `CNNModel` (CNN + MLP, no memory) and `RNNModel` (GRU/LSTM on 1D inputs only), but nothing that runs a CNN and then a GRU. You need one small class.
 
-**Where:** `source/rl_training/rl_training/rsl_rl/models/depth_cnn_gru.py`. Create `models/__init__.py` exporting it. `rl_training/rsl_rl/` already holds the repo's custom AMP code. The config will reference it as `"rl_training.rsl_rl.models:DepthCNNGRUModel"` (RSL-RL resolves `module:Class` strings).
+**Where:** `source/rl_training/rl_training/models/depth_cnn_gru.py`. Create `models/__init__.py` exporting it. Not under `rl_training/rsl_rl/`: that is the AMP package, whose `__init__` imports `pybullet_utils` (not installed), so anything imported through it crashes. The config will reference it as `"rl_training.models:DepthCNNGRUModel"` (RSL-RL resolves `module:Class` strings).
 
 **What it must do:**
 
@@ -106,7 +106,7 @@ RslRlMLPModelCfg(
 ```python
 @configclass
 class DepthCNNGRUModelCfg(RslRlCNNModelCfg):
-    class_name: str = "rl_training.rsl_rl.models:DepthCNNGRUModel"
+    class_name: str = "rl_training.models:DepthCNNGRUModel"
     rnn_type: str = "gru"
     rnn_hidden_dim: int = 256
     rnn_num_layers: int = 1
