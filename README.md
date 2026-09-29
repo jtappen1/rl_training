@@ -14,7 +14,7 @@ Stair-climbing and rough-terrain policies for the **DEEP Robotics M20** wheeled 
 What this fork adds on top of the upstream blind `Rough-Deeprobotics-M20-v0` task:
 
 - **Sighted stair tasks** (v1 → v2 → v3 → v3b). The policy reads a forward-biased height scan, and the tasks add stair-aware rewards, terrain and curriculum. v2 was the first to reliably climb and descend stairs; v3/v3b add heading holding. See [docs/stairs_sighted_v2_summary.md](docs/stairs_sighted_v2_summary.md).
-- **A depth student env** for distilling a sighted teacher into a depth-camera + proprioception policy. It has a ray-cast depth camera and a depth noise model. See [docs/student_distillation_setup.md](docs/student_distillation_setup.md).
+- **A depth student, distilled from the sighted teacher.** It sees only proprioception (57 dims) and a 64×36 depth image, through a CNN → GRU → MLP network. It learns to reproduce the v3b teacher's actions without the privileged height map, and climbs the same stairs. See [Depth-conditioned policies](#depth-conditioned-policies-teacher--student) for the full train → eval → distil → eval pipeline.
 - **Evaluation tools**: a fixed-geometry stairs benchmark and a long mixed-terrain course, both with CSV/markdown reports and video.
 - **Keyboard driving** on the stairs benchmark, the course, and real-world ZED scans (a skatepark), with an on-screen speed/depth readout.
 
@@ -71,7 +71,7 @@ All tasks are registered in [`config/wheeled/deeprobotics_m20/__init__.py`](sour
 | `Stairs-Sighted-V2-Deeprobotics-M20-v0` | v2: yaw-frame velocity tracking, stair-aware orientation limits, stair progress reward, wheel clearance reward, forward-biased scan, stair curriculum. 100% up to 0.25 m. |
 | `Stairs-Sighted-V3-Deeprobotics-M20-v0` | v3: v2 + a heading-hold reward and straight-only commands; wheel clearance reward removed. Fixed heading drift, but ascent regressed. |
 | `Stairs-Sighted-V3b-Deeprobotics-M20-v0` | v3b: v3 with the wheel clearance reward restored. The current main policy. |
-| `Stairs-Student-Deeprobotics-M20-v0` | Depth student: `teacher` (v2 policy obs, noise-free), `policy` (proprioception), `depth` (64×36 image). The distillation runner is not written yet. |
+| `Stairs-Student-Deeprobotics-M20-v0` | Depth student, distilled from frozen v3b. Obs groups: `teacher` (v3b's policy obs, noise-free, 288), `policy` (proprioception, 57), `depth` (1×36×64 image). Runner: `DistillationRunner` with `DepthCNNGRUModel`. |
 
 **Keyboard-drive tasks** (play only, see [Keyboard driving](#keyboard-driving))
 
@@ -92,7 +92,8 @@ python scripts/reinforcement_learning/rsl_rl/train.py --task=Stairs-Sighted-V3b-
 
 - Smoke-test a new task first: `--num_envs 16 --max_iterations 2`.
 - Resume: `--resume --load_run <run_folder> --checkpoint model_<N>.pt`.
-- Logs and checkpoints go to `logs/rsl_rl/<experiment_name>/<timestamp>/`. The experiment names are `deeprobotics_m20_rough`, `deeprobotics_m20_stairs_sighted`, `..._sighted_v2`, `..._sighted_v3` and `..._sighted_v3b`.
+- Logs and checkpoints go to `logs/rsl_rl/<experiment_name>/<timestamp>/`. The experiment names are `deeprobotics_m20_rough`, `deeprobotics_m20_stairs_sighted`, `..._sighted_v2`, `..._sighted_v3`, `..._sighted_v3b` and `deeprobotics_m20_stairs_student`.
+- The depth student is trained differently (distillation from a teacher checkpoint); see [Depth-conditioned policies](#depth-conditioned-policies-teacher--student).
 - TensorBoard: `tensorboard --logdir=logs`.
 - Diff the configs of two runs (from their saved `params/`): `python scripts/tools/compare_runs.py <run_dir_1> <run_dir_2>`.
 
@@ -112,6 +113,7 @@ python scripts/reinforcement_learning/rsl_rl/play.py --task=Stairs-Sighted-V3b-D
 - `--num_envs N`: number of robots (default 50).
 - `--video --video_length 200`: record an mp4 into the checkpoint's `videos/play/` folder. Frames are buffered in RAM, so keep clips short.
 - `--real-time`: slow the sim down to wall-clock speed.
+- **Depth students**: always pass `--checkpoint <student_run>/model_<N>.pt`. Without it, `play.py` would take the student runner's default `load_run`, which is the *teacher* checkpoint; it refuses that rather than play an untrained student. Export is skipped for the student (the rsl-rl exporter doesn't handle its GRU yet).
 
 ### Keyboard driving
 
@@ -158,6 +160,10 @@ Choose the `--recenter` point (in the original mesh's coordinates) on a flat, op
 ## Evaluation
 
 Both eval scripts take `--checkpoint <model.pt or run dir>`; with a run dir, they use the highest-iteration checkpoint in it. They write to `eval/`, which is git-ignored.
+
+Both work for PPO policies and for distilled depth students (pass the student's `--task` and run). For a student:
+- the videos add a top-left panel showing the depth image exactly as the CNN received it (invalid pixels in magenta), next to the teacher's height map;
+- the depth input is evaluated as trained, noise included; add `--clean_depth` to turn the noise model off.
 
 ### Stairs benchmark — `eval_stairs.py`
 
@@ -211,6 +217,113 @@ A sanity check for the student env. The frozen teacher drives `Stairs-Student-De
 python scripts/tools/dump_depth.py --headless [--teacher <model.pt>] [--num_envs 16] [--steps 150]
 ```
 
+## Depth-conditioned policies (teacher → student)
+
+There are two kinds of locomotion policy you can build here:
+
+- **Blind (proprioception only).** Start from the upstream `Rough-Deeprobotics-M20-v0` task, add or change rewards, train, and check it with the eval scripts. Only [Training](#training) and [Evaluation](#evaluation) apply.
+- **Depth-conditioned.** Done in two stages, because learning directly from a noisy depth camera with RL is slow and unstable:
+  1. **Teacher.** Train a policy with *privileged* terrain information: an exact height map around the robot. This is the upper bound on how well the student can do, so get its behavior right first.
+  2. **Student.** Distil the frozen teacher into a policy that only sees what the real robot has: proprioception and a depth camera.
+
+**How the student works.**
+- **Inputs:** proprioception (base angular velocity, projected gravity, velocity command, joint positions and velocities, last action; 57 dims; no base linear velocity) plus a depth image downsampled to 64×36 (a `1×36×64` tensor, values in [0, 1], 0 = invalid pixel).
+- **Network** (`DepthCNNGRUModel`): the image goes through a CNN; its features plus the proprioception go through a GRU (memory, so it can remember terrain that has left the camera's view), then an MLP outputs the actions.
+- **Training** (rsl-rl's `DistillationRunner`): the student drives the robot, and at every step the frozen teacher outputs the action it would have taken from its height map. The student is trained with an MSE loss to reproduce those actions. There's no reward or critic in this stage. Because the student drives, it also learns to recover from states its own mistakes lead to.
+
+**First result:** a student distilled from v3b (2048 envs, 2000 iterations, ~52 min on a 12 GB RTX 4070) climbs and descends the stairs benchmark at 0.5 m/s up to 0.25 m steps with no falls, and finishes the 60 m multi-terrain course, without the height map.
+
+### End to end
+
+Placeholders used below:
+
+| Placeholder | Meaning | Example |
+|---|---|---|
+| `<teacher_task>` | the sighted (height-map) training task | `Stairs-Sighted-V3b-Deeprobotics-M20-v0` |
+| `<teacher_experiment>` | that task's experiment name (its log folder) | `deeprobotics_m20_stairs_sighted_v3b` |
+| `<teacher_run>` | the teacher's run folder | `2026-09-24_02-44-54` |
+| `<N>` | the teacher checkpoint's iteration | `5999` |
+| `<teacher_name>` | a stable name for the teacher inside the student's log folder | `teacher_v3b` |
+| `<num_envs>` | parallel envs for distillation (see step 5) | `2048` |
+| `<student_run>` | the student's run folder, created by step 5 | `2026-09-28_21-30-40` |
+
+**1. Train the teacher.**
+
+```bash
+python scripts/reinforcement_learning/rsl_rl/train.py --task=<teacher_task> --headless
+```
+
+**2. Evaluate the teacher.** Its results are the ceiling for the student. If it doesn't behave the way you want, iterate on step 1 before going further.
+
+```bash
+python scripts/tools/eval_stairs.py --headless --task <teacher_task> \
+    --checkpoint logs/rsl_rl/<teacher_experiment>/<teacher_run>
+python scripts/tools/eval_multi_terrain_course.py --headless --task <teacher_task> \
+    --checkpoint logs/rsl_rl/<teacher_experiment>/<teacher_run> --speed 0.7 --steering straight
+python scripts/tools/eval_multi_terrain_course.py --headless --task <teacher_task> \
+    --checkpoint logs/rsl_rl/<teacher_experiment>/<teacher_run> --speed 0.7 --steering heading_hold
+```
+
+**3. Point the student at the teacher.** Skip (a) and (b) if you're using v3b.
+
+- (a) **Env.** In [stairs_env_cfg.py](source/rl_training/rl_training/tasks/manager_based/locomotion/velocity/config/wheeled/deeprobotics_m20/stairs_env_cfg.py), change the parent class of `DeeproboticsM20StairsStudentEnvCfg` (currently `DeeproboticsM20StairsSightedV3bEnvCfg`) to your teacher's env config class. The student's `teacher` observation group is a noise-free copy of the parent's `policy` group, so it automatically matches what the teacher was trained on. The student's `policy` group is the same minus `height_scan`.
+- (b) **Teacher network.** In [agents/rsl_rl_distillation_cfg.py](source/rl_training/rl_training/tasks/manager_based/locomotion/velocity/config/wheeled/deeprobotics_m20/agents/rsl_rl_distillation_cfg.py), `teacher` must match the teacher's actor *exactly* (hidden dims, activation, obs normalization, std type), or its weights won't load. The defaults match v3b: `[512, 256, 128]`, `elu`, no normalization, log std.
+- (c) **Symlink the checkpoint.** For distillation, `train.py` only looks for the checkpoint inside the *student's* log folder, so link the teacher run there:
+
+  ```bash
+  mkdir -p logs/rsl_rl/deeprobotics_m20_stairs_student
+  ln -sfn ../<teacher_experiment>/<teacher_run> logs/rsl_rl/deeprobotics_m20_stairs_student/<teacher_name>
+  ```
+
+**4. Check everything before a long run** (each takes about a minute):
+
+```bash
+# student network on real observations: output/hidden-state shapes + GRU reset -> prints [PASS]
+python scripts/tools/test_student_cnn.py --headless
+
+# the teacher loads from the `teacher` group; writes noisy vs clean depth frames to debug/depth/
+python scripts/tools/dump_depth.py --headless \
+    --teacher logs/rsl_rl/<teacher_experiment>/<teacher_run>/model_<N>.pt
+
+# 2-iteration distillation smoke test
+python scripts/reinforcement_learning/rsl_rl/train.py --task=Stairs-Student-Deeprobotics-M20-v0 --headless \
+    --num_envs 16 --max_iterations 2 --load_run <teacher_name> --checkpoint model_<N>.pt
+```
+
+In the smoke test's log, check for `Loading model checkpoint from: .../<teacher_name>/model_<N>.pt`, the `Student Model:` and `Teacher Model:` printouts, and a `Mean behavior loss` line. Then delete its run folder from `logs/rsl_rl/deeprobotics_m20_stairs_student/`.
+
+**5. Distil.**
+
+```bash
+python scripts/reinforcement_learning/rsl_rl/train.py --task=Stairs-Student-Deeprobotics-M20-v0 --headless \
+    --num_envs <num_envs> --load_run <teacher_name> --checkpoint model_<N>.pt
+```
+
+- `--load_run` / `--checkpoint` override the runner config's defaults (`teacher_v3b` / `model_5999.pt`); you can drop them if those match.
+- **Sizing:** the depth camera adds 2304 rays per env. On a 12 GB RTX 4070: 1024 envs ≈ 6.5 GB, 1.1 s/iteration; 2048 envs ≈ 9.4 GB, 1.6 s/iteration (2000 iterations ≈ 52 min); 4096 runs out of memory.
+- **Watch** `Loss/behavior` in TensorBoard; it should drop steadily over the first few hundred iterations. The terrain curriculum stays on, and since the student drives, the terrain levels show what the *student* can climb.
+
+**6. Evaluate the student** on the same terrains as the teacher and compare the reports. The gap is what losing the height map costs.
+
+```bash
+python scripts/tools/eval_stairs.py --headless --task Stairs-Student-Deeprobotics-M20-v0 \
+    --checkpoint logs/rsl_rl/deeprobotics_m20_stairs_student/<student_run>
+python scripts/tools/eval_multi_terrain_course.py --headless --task Stairs-Student-Deeprobotics-M20-v0 \
+    --checkpoint logs/rsl_rl/deeprobotics_m20_stairs_student/<student_run> --speed 0.7 --steering heading_hold
+
+# watch it (GUI); the Play task turns the depth noise off
+python scripts/reinforcement_learning/rsl_rl/play.py --task=Stairs-Student-Deeprobotics-M20-Play-v0 \
+    --checkpoint logs/rsl_rl/deeprobotics_m20_stairs_student/<student_run>/model_<N>.pt
+```
+
+If it navigates the terrain correctly, it's ready for sim-to-sim testing.
+
+**7. Not done yet:**
+- **Sim-to-sim (MuJoCo)** needs the depth camera set up in MuJoCo, and an export for `DepthCNNGRUModel` that includes the GRU and its hidden state (the rsl-rl exporter drops it).
+- **The camera is still a placeholder**: an approximate D435-like FOV at a guessed mount pose, with a generic noise model. Work on matching the Intel RealSense D435i (and the real mount) is in progress. When the camera changes, only the student needs retraining (steps 4–6); the teacher doesn't.
+
+More detail on the design choices: [docs/student_distillation_setup.md](docs/student_distillation_setup.md).
+
 ## Exporting a policy
 
 `play.py` exports to `exported/` next to the checkpoint. To export straight from the `.pt` without Isaac Sim:
@@ -232,15 +345,19 @@ scripts/reinforcement_learning/rsl_rl/      # train.py, play.py (keyboard drive 
 scripts/tools/
 ├── eval_stairs.py                          # stairs benchmark
 ├── eval_multi_terrain_course.py            # mixed-terrain course
-├── heightmap_overlay.py                    # height-map video overlay used by the evals
+├── heightmap_overlay.py                    # height-map (+ student depth) video overlay used by the evals
 ├── dump_depth.py                           # student depth-frame dump
+├── test_student_cnn.py                     # student network shape / GRU-reset test
 └── convert_terrain_mesh.py                 # scan OBJ -> terrain USD
+source/rl_training/rl_training/models/
+└── depth_cnn_gru.py                        # DepthCNNGRUModel: CNN -> GRU -> MLP student
 source/rl_training/rl_training/tasks/manager_based/locomotion/velocity/
 ├── mdp/stairs.py                           # stair-aware rewards, terminations, curriculum
 ├── mdp/depth.py                            # depth observation + noise model
 └── config/wheeled/deeprobotics_m20/
     ├── rough_env_cfg.py, flat_env_cfg.py   # upstream blind tasks
     ├── stairs_env_cfg.py                   # Teacher, Sighted v1/v2/v3/v3b, Student
+    ├── agents/rsl_rl_distillation_cfg.py   # student distillation runner (teacher + student models)
     ├── eval_terrains.py                    # stairs benchmark + course terrain builders (shared)
     ├── eval_play_env_cfg.py                # Stairs-Bench / Course keyboard tasks
     └── skatepark_env_cfg.py                # scanned-terrain tasks
@@ -252,6 +369,9 @@ source/rl_training/rl_training/tasks/manager_based/locomotion/velocity/
 - **`ModuleNotFoundError: No module named 'isaaclab'`** when using `isaaclab.sh`: a virtualenv is active. Run `unset VIRTUAL_ENV CONDA_PREFIX`.
 - **`CXXABI_1.3.15 not found`** (Conda): run `python scripts/tools/setup_conda_runtime.py`, then deactivate and reactivate the environment.
 - **Missing robot URDF/USD**: `git submodule update --init --recursive`.
+- **`CUDNN_STATUS_NOT_INITIALIZED`** on the first conv/GRU (student training, `test_student_cnn.py`): Isaac Sim's torch is loading the wrong cuDNN. Check with `python -c "import torch; print(torch.backends.cudnn.version())"`; torch 2.7.0+cu128 needs `90701`. A leftover CUDA 13 install (`nvidia-cudnn-cu13`, `nvidia-nccl-cu13`, `nvidia-cusparselt-cu13`) writes into the same folders as torch's cu12 libraries. Uninstall those three, then `pip install --no-deps --force-reinstall nvidia-cudnn-cu12==9.7.1.26 nvidia-nccl-cu12==2.26.2 nvidia-cusparselt-cu12==0.6.3`.
+- **Student training runs out of GPU memory**: reduce `--num_envs` (see [Distil](#depth-conditioned-policies-teacher--student), step 5).
+- **`ModuleNotFoundError: No module named 'pybullet_utils'`** when importing a model: don't put new modules under `rl_training/rsl_rl/` (that's the AMP package, which imports pybullet on load); use `rl_training/models/`.
 - **Skatepark task fails to load its terrain**: check that `SKATEPARK_USD_PATH` in `skatepark_env_cfg.py` points at a file under `mesh/` that exists.
 - **USD cache filling the disk**: `rm -rf /tmp/IsaacLab/usd_*`.
 - **Pylance can't find Isaac Lab modules**: add `source/rl_training` and `<isaaclab>/source/isaaclab{,_assets,_rl,_tasks}` to `python.analysis.extraPaths` in `.vscode/settings.json`.
