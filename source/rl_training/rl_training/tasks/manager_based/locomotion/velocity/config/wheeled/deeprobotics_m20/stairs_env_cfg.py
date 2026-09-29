@@ -779,17 +779,17 @@ def add_depth_camera(env_cfg, noisy: bool = True) -> None:
 
 
 @configclass
-class DeeproboticsM20StairsStudentEnvCfg(DeeproboticsM20StairsSightedV2EnvCfg):
+class DeeproboticsM20StairsStudentEnvCfg(DeeproboticsM20StairsSightedV3bEnvCfg):
     """Depth student env for sequential (DAgger-style) distillation from a frozen sighted teacher.
 
-    Same terrain, commands, curriculum and rewards as the teacher's env (v2 -- the teacher checkpoint
-    is `deeprobotics_m20_stairs_sighted_v2/2026-09-23_15-04-55/model_5300.pt`; to distil from v3b
-    instead, change the parent class and the checkpoint together). Observation groups:
+    Same terrain, commands, curriculum and rewards as the teacher's env (v3b -- the teacher checkpoint
+    is `deeprobotics_m20_stairs_sighted_v3b/2026-09-24_02-44-54/model_5999.pt`; to distil from another
+    sighted run, change the parent class and the checkpoint together). Observation groups:
 
-    - `teacher`: exact, noise-free copy of the v2 `policy` group (proprioception + height scan, same
-      terms / order / scales -> 288 dims), so the frozen PPO actor loads strictly and sees what it
-      was trained on;
-    - `policy`: the student's proprioception = v2 `policy` minus the height scan (keeps its noise);
+    - `teacher`: exact, noise-free copy of the v3b `policy` group (proprioception + height scan, same
+      terms / order / scales -> 288 dims; identical to v2's), so the frozen PPO actor loads strictly
+      and sees what it was trained on;
+    - `policy`: the student's proprioception = v3b `policy` minus the height scan (keeps its noise);
     - `depth`: (N, 1, 36, 64) depth image from a front ray-cast camera, with the noise model in
       `mdp.depth_image` while `enable_corruption` is on;
     - `critic`: unchanged (unused by distillation).

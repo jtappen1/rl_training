@@ -109,6 +109,14 @@ def convert_rsl_rl_cfg_dict(cfg_dict: dict) -> dict:
     Returns:
         The converted config dict compatible with rsl-rl v5+.
     """
+    # Distillation student/teacher model cfgs: `RslRlMLPModelCfg.to_dict()` still emits these
+    # deprecated keys, and rsl-rl passes the model cfg straight to the constructor as **kwargs.
+    for name in ("student", "teacher"):
+        model_cfg = cfg_dict.get(name)
+        if isinstance(model_cfg, dict):
+            for key in ("stochastic", "init_noise_std", "noise_std_type", "state_dependent_std"):
+                model_cfg.pop(key, None)
+
     if cfg_dict.get("actor") and cfg_dict.get("critic"):
         # Already in new format. `RslRlOnPolicyRunnerCfg` carries both the legacy `policy` field
         # (which every runner cfg in this repo actually populates) and newer `actor`/`critic`
@@ -166,3 +174,41 @@ def convert_rsl_rl_cfg_dict(cfg_dict: dict) -> dict:
         cfg_dict["obs_groups"] = {}
 
     return cfg_dict
+
+
+def load_inference_policy(env, agent_cfg, checkpoint_path: str, device: str | None = None):
+    """Build the right rsl-rl runner for `agent_cfg`, load `checkpoint_path`, return (runner, policy).
+
+    Handles PPO (`OnPolicyRunner`) and distillation (`DistillationRunner`, where the policy is the
+    student) runner cfgs. For distillation, refuses a checkpoint without a student (e.g. the teacher
+    PPO checkpoint the runner cfg's `load_run` points at for training), which would otherwise load
+    silently and play a randomly initialised student.
+
+    The returned policy may be recurrent: call `policy.reset(dones)` after every env step (inside
+    `torch.inference_mode()` if the forward pass ran in it) and `policy.reset()` after `env.reset()`.
+    It is a no-op for MLP policies.
+    """
+    import torch
+    from rsl_rl.runners import DistillationRunner, OnPolicyRunner
+
+    train_cfg = agent_cfg.to_dict()
+    # PPO runner cfgs carry unset (MISSING -> empty dict) actor/critic next to the legacy `policy`
+    # field; drop them so convert_rsl_rl_cfg_dict does the policy -> actor/critic conversion.
+    if not train_cfg.get("actor"):
+        train_cfg.pop("actor", None)
+    if not train_cfg.get("critic"):
+        train_cfg.pop("critic", None)
+    train_cfg = convert_rsl_rl_cfg_dict(train_cfg)
+
+    is_distillation = getattr(agent_cfg, "class_name", "OnPolicyRunner") == "DistillationRunner"
+    if is_distillation:
+        keys = torch.load(checkpoint_path, map_location="cpu", weights_only=False).keys()
+        if "student_state_dict" not in keys:
+            raise ValueError(
+                f"{checkpoint_path} has no student (keys: {sorted(keys)}). Pass a student checkpoint from "
+                f"logs/rsl_rl/{agent_cfg.experiment_name}/<run>/model_*.pt."
+            )
+    runner_class = DistillationRunner if is_distillation else OnPolicyRunner
+    runner = runner_class(env, train_cfg, log_dir=None, device=agent_cfg.device)
+    runner.load(checkpoint_path)
+    return runner, runner.get_inference_policy(device=device or env.unwrapped.device)

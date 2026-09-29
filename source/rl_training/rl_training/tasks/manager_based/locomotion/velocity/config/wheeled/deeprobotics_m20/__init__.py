@@ -222,7 +222,7 @@ gym.register(
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
-        # Depth student for distillation from the frozen v2 teacher. The distillation runner cfg
+        # Depth student for distillation from the frozen v3b teacher. The distillation runner cfg
         # (`agents/rsl_rl_distillation_cfg.py`) is written separately -- see
         # docs/student_distillation_setup.md.
         "env_cfg_entry_point": f"{__name__}.stairs_env_cfg:DeeproboticsM20StairsStudentEnvCfg",

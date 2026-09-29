@@ -2,7 +2,7 @@
 
 *2026-09-24. For whoever writes the student model and runner config. The env side is done: see [What already exists](#what-already-exists).*
 
-Plan: sequential, DAgger-style distillation. A **frozen** sighted teacher (v2, `model_5300.pt`) drives a depth + proprioception **student**, and the student is trained to reproduce the teacher's actions. It uses RSL-RL 5.0.1's built-in `DistillationRunner` / `Distillation`. The only custom code is the student network (a CNN + GRU model) and a small config-conversion fix.
+Plan: sequential, DAgger-style distillation. A **frozen** sighted teacher (v3b, `model_5999.pt`) drives a depth + proprioception **student**, and the student is trained to reproduce the teacher's actions. It uses RSL-RL 5.0.1's built-in `DistillationRunner` / `Distillation`. The only custom code is the student network (a CNN + GRU model) and a small config-conversion fix.
 
 ## What already exists
 
@@ -12,25 +12,25 @@ Plan: sequential, DAgger-style distillation. A **frozen** sighted teacher (v2, `
 | Depth camera | `scene.depth_camera`: ray-cast, 64×36, ~87°×56° FOV, 10 Hz, clipped 0.1–2.5 m. **Mount pose is a placeholder** (`STUDENT_CAMERA_*` constants) |
 | Depth noise model | `mdp/depth.py` (`depth_image`): noise ∝ depth, dropout, holes, edge (flying-pixel) drops, 0–2 step latency, frame drops. Active only while `observations.depth.enable_corruption` is True |
 | Debug frames | `scripts/tools/dump_depth.py` → `debug/depth/depth_grid.png` (teacher drives, noisy vs clean frames) |
-| Teacher checkpoint | `logs/rsl_rl/deeprobotics_m20_stairs_sighted_v2/2026-09-23_15-04-55/model_5300.pt` |
+| Teacher checkpoint | `logs/rsl_rl/deeprobotics_m20_stairs_sighted_v3b/2026-09-24_02-44-54/model_5999.pt` (switched from v2 `model_5300` on 2026-09-26; v3b is the best sighted policy) |
 | Gym registration | already points at `agents/rsl_rl_distillation_cfg.py:DeeproboticsM20StairsStudentRunnerCfg`, which is **the file you create in step 2** |
 
 Observation groups produced by the env (shapes verified with 16 envs):
 
 | Group | Shape | Contents | Used by |
 |---|---|---|---|
-| `teacher` | (N, 288) | exact noise-free copy of v2's `policy` group (proprio + height scan) | teacher |
-| `policy` | (N, 57) | student proprioception (v2 `policy` minus height scan, with noise) | student |
+| `teacher` | (N, 288) | exact noise-free copy of v3b's `policy` group (identical to v2's) (proprio + height scan) | teacher |
+| `policy` | (N, 57) | student proprioception (v3b `policy` minus height scan, with noise) | student |
 | `depth` | (N, 1, 36, 64) | depth image in [0, 1]; 0 = invalid pixel | student |
 | `critic` | (N, 291) | unchanged, unused by distillation | none |
 
-`dump_depth.py` already loads v2's actor **strictly** from the `teacher` group, so the teacher side is verified.
+`dump_depth.py` loads the teacher's actor **strictly** from the `teacher` group, so the teacher side is verified.
 
 ## Step 1: the student network
 
 **Why custom:** RSL-RL 5.0.1 has `CNNModel` (CNN + MLP, no memory) and `RNNModel` (GRU/LSTM on 1D inputs only), but nothing that runs a CNN and then a GRU. You need one small class.
 
-**Where:** `source/rl_training/rl_training/rsl_rl/models/depth_cnn_gru.py`. Create `models/__init__.py` exporting it. `rl_training/rsl_rl/` already holds the repo's custom AMP code. The config will reference it as `"rl_training.rsl_rl.models:DepthCNNGRUModel"` (RSL-RL resolves `module:Class` strings).
+**Where:** `source/rl_training/rl_training/models/depth_cnn_gru.py`. Create `models/__init__.py` exporting it. Not under `rl_training/rsl_rl/`: that is the AMP package, whose `__init__` imports `pybullet_utils` (not installed), so anything imported through it crashes. The config will reference it as `"rl_training.models:DepthCNNGRUModel"` (RSL-RL resolves `module:Class` strings).
 
 **What it must do:**
 
@@ -89,10 +89,10 @@ Create `config/wheeled/deeprobotics_m20/agents/rsl_rl_distillation_cfg.py` with 
 | `max_iterations` | ~2000–3000 to start | distillation converges much faster than RL |
 | `save_interval` | 100 | |
 | `obs_groups` | `{"student": ["policy", "depth"], "teacher": ["teacher"]}` | routes env groups to the two models |
-| `load_run` / `load_checkpoint` | `"teacher_v2"` / `"model_5300.pt"` | see step 4 |
+| `load_run` / `load_checkpoint` | `"teacher_v3b"` / `"model_5999.pt"` | see step 4 |
 | `algorithm` | `RslRlDistillationAlgorithmCfg(num_learning_epochs=2, learning_rate=1e-3, gradient_length=15, max_grad_norm=1.0, loss_type="mse")` | `gradient_length` = GRU truncated-backprop steps |
 
-**`teacher`** must reproduce v2's actor **exactly**, or the strict load fails:
+**`teacher`** must reproduce v3b's actor **exactly** (same shape as v2's), or the strict load fails:
 
 ```python
 RslRlMLPModelCfg(
@@ -106,7 +106,7 @@ RslRlMLPModelCfg(
 ```python
 @configclass
 class DepthCNNGRUModelCfg(RslRlCNNModelCfg):
-    class_name: str = "rl_training.rsl_rl.models:DepthCNNGRUModel"
+    class_name: str = "rl_training.models:DepthCNNGRUModel"
     rnn_type: str = "gru"
     rnn_hidden_dim: int = 256
     rnn_num_layers: int = 1
@@ -139,12 +139,12 @@ It's a no-op for the existing PPO configs (their `actor`/`critic` dicts are buil
 
 ## Step 4: make the teacher checkpoint findable
 
-For distillation, `train.py` always loads a checkpoint from `logs/rsl_rl/<experiment_name>/<load_run>/<load_checkpoint>`, i.e. inside the **student's** experiment folder. Point a stable name at the v2 run:
+For distillation, `train.py` always loads a checkpoint from `logs/rsl_rl/<experiment_name>/<load_run>/<load_checkpoint>`, i.e. inside the **student's** experiment folder. Point a stable name at the v3b run:
 
 ```bash
 cd /workspace/rl_training
 mkdir -p logs/rsl_rl/deeprobotics_m20_stairs_student
-ln -s ../deeprobotics_m20_stairs_sighted_v2/2026-09-23_15-04-55 logs/rsl_rl/deeprobotics_m20_stairs_student/teacher_v2
+ln -s ../deeprobotics_m20_stairs_sighted_v3b/2026-09-24_02-44-54 logs/rsl_rl/deeprobotics_m20_stairs_student/teacher_v3b
 ```
 
 `Distillation.load()` sees `actor_state_dict` in that file and loads **only** the teacher (iteration reset to 0). Student runs then land beside the symlink as timestamped folders.
@@ -164,7 +164,7 @@ PYTHONUNBUFFERED=1 /workspace/isaaclab/isaaclab.sh -p scripts/reinforcement_lear
   --task Stairs-Student-Deeprobotics-M20-v0 --num_envs 4096 --headless 2>&1 | tee train_student.log
 ```
 
-- **In the log, look for:** `Loading model checkpoint from: .../teacher_v2/model_5300.pt`, both models printed, and a `behavior` loss that falls steadily.
+- **In the log, look for:** `Loading model checkpoint from: .../teacher_v3b/model_5999.pt`, both models printed, and a `behavior` loss that falls steadily.
 - **Env count:** 4096 is a guess. The camera adds 2304 rays per env per frame. The 6144-env teacher runs may not fit alongside it, so check GPU memory on the smoke test and scale up.
 - **Curriculum:** it stays on. The *student* drives, so terrain levels show whether the student, not the teacher, can climb.
 
@@ -177,5 +177,5 @@ PYTHONUNBUFFERED=1 /workspace/isaaclab/isaaclab.sh -p scripts/reinforcement_lear
 
 - [ ] **Real camera mount pose, model, FPS and latency** (command.md Phase 5, **[ASK HUMAN]**). The current mount is a placeholder, and the student must be retrained after it changes.
 - [ ] Not modelled yet: self-occlusion by legs/wheels, camera extrinsics jitter, blur (command.md 7.1).
-- [ ] Teacher choice: v2 now. If v3b turns out better, change the student env's parent class to `DeeproboticsM20StairsSightedV3bEnvCfg` **and** the symlink together (their teacher obs are identical, 288 dims).
+- [x] Teacher choice: v3b (switched from v2 on 2026-09-26). To change it again, change the student env's parent class **and** the symlink together; all sighted v2/v3/v3b runs share the same 288-dim teacher obs.
 - [ ] Optional after distillation: PPO fine-tuning of the student (command.md 8.4). Needs the padded-sequence handling from step 1.

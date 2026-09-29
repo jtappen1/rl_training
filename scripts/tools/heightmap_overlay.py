@@ -1,13 +1,17 @@
 # Copyright (c) 2025 Deep Robotics
 # SPDX-License-Identifier: BSD 3-Clause
 
-"""Height-map visualization for recorded videos (used by `eval_stairs.py --video`).
+"""Policy-input visualization for recorded videos (eval_stairs.py --video, eval_multi_terrain_course.py).
 
 `HeightmapOverlay` is a gym wrapper that, for one followed env:
 - draws the height-scanner ray hits in the 3D scene as spheres colored by terrain height relative to
   the ground under the robot (so they show up in the RTX-rendered video frame), and
-- composites a top-down inset of the same grid onto each `render()` frame, oriented forward-up,
-  with the robot's base cell marked -- i.e. the height map the policy reads, in its own frame.
+- composites a top-down inset of the same grid onto each `render()` frame (top right), oriented
+  forward-up, with the robot's base cell marked -- the height map a sighted policy (or a student's
+  teacher) reads, in its own frame;
+- if the env has a `depth` observation group (depth students), composites that image (top left)
+  exactly as the CNN received it on the latest step -- noise, latency and invalid pixels included
+  (invalid = magenta).
 
 Wrap the raw env *before* `gym.wrappers.RecordVideo`, which grabs frames via `env.render()`.
 Must be imported after the Isaac Sim app has been launched (it imports `isaaclab.markers`).
@@ -36,6 +40,8 @@ class HeightmapOverlay(gym.Wrapper):
         height_range: float = 0.6,
         cell_px: int = 14,
         label_fn=None,
+        show_heightmap: bool = True,
+        depth_px: int = 5,
     ):
         """
         Args:
@@ -44,6 +50,8 @@ class HeightmapOverlay(gym.Wrapper):
                 under the robot base.
             cell_px: inset pixels per grid cell.
             label_fn: optional `f(step) -> str` drawn under the inset (e.g. trial combo, time).
+            show_heightmap: draw the height-map spheres + inset (the depth panel is independent).
+            depth_px: depth-panel pixels per depth-image pixel.
         """
         super().__init__(env)
         self.env_id = env_id
@@ -51,6 +59,21 @@ class HeightmapOverlay(gym.Wrapper):
         self.cell_px = cell_px
         self.label_fn = label_fn
         self._step = 0
+        self.show_heightmap = show_heightmap
+        self.depth_px = depth_px
+        self._depth = None  # latest (H, W) depth observation of env_id, in [0, 1]
+        obs_cfg = self.env.unwrapped.cfg.observations
+        self.has_depth = getattr(obs_cfg, "depth", None) is not None
+        self.has_teacher = getattr(obs_cfg, "teacher", None) is not None
+        if self.has_depth:
+            p = obs_cfg.depth.depth_image.params
+            self.depth_range = (p.get("near", 0.0), p.get("far", 0.0))
+        try:
+            self.font = ImageFont.truetype("DejaVuSans.ttf", 14)
+        except OSError:
+            self.font = ImageFont.load_default()
+        if not show_heightmap:
+            return
 
         self.sensor = self.env.unwrapped.scene.sensors[sensor_name]
         pattern = self.sensor.cfg.pattern_cfg
@@ -79,30 +102,74 @@ class HeightmapOverlay(gym.Wrapper):
                 },
             )
         )
-        try:
-            self.font = ImageFont.truetype("DejaVuSans.ttf", 14)
-        except OSError:
-            self.font = ImageFont.load_default()
 
     # ------------------------------------------------------------------ gym API
 
     def reset(self, **kwargs):
         self._step = 0
-        return self.env.reset(**kwargs)
+        out = self.env.reset(**kwargs)
+        self._grab_depth(out[0])
+        return out
 
     def step(self, action):
         self._step += 1
-        return self.env.step(action)
+        out = self.env.step(action)
+        self._grab_depth(out[0])
+        return out
 
     def render(self):
-        rel, hits = self._relative_heights()
-        self._update_markers(rel, hits)
+        if self.show_heightmap:
+            rel, hits = self._relative_heights()
+            self._update_markers(rel, hits)
         frame = self.env.render()  # re-renders the sim, so the markers above are in this frame
         if frame is None:
             return frame
-        return self._composite(frame, rel)
+        if self.show_heightmap:
+            frame = self._composite(frame, rel)
+        if self._depth is not None:
+            frame = self._composite_depth(frame)
+        return frame
 
     # ------------------------------------------------------------------ internals
+
+    def _grab_depth(self, obs) -> None:
+        if self.has_depth and isinstance(obs, dict) and "depth" in obs:
+            self._depth = obs["depth"][self.env_id, 0].detach().float().cpu().numpy()
+
+    def _composite_depth(self, frame: np.ndarray) -> np.ndarray:
+        """Top-left panel: the student's depth observation, near = dark, far = yellow, invalid = magenta."""
+        img = self._depth
+        rgb = (colormaps["viridis"](np.clip(img, 0.0, 1.0))[..., :3] * 255).astype(np.uint8)
+        rgb[img <= 0] = (255, 0, 255)
+        k = self.depth_px
+        inset = Image.fromarray(np.kron(rgb, np.ones((k, k, 1), dtype=np.uint8)))
+
+        pad, bar_h, text_h = 6, 10, 18
+        near, far = self.depth_range
+        invalid = float((img <= 0).mean()) * 100
+        lines = [f"student depth input {img.shape[1]}x{img.shape[0]}   invalid {invalid:.0f}%"]
+        text_w = max(int(self.font.getlength(line)) for line in lines)
+        panel_w = max(inset.width, text_w) + 2 * pad
+        panel_h = inset.height + bar_h + text_h * (len(lines) + 1) + 3 * pad
+        panel = Image.new("RGB", (panel_w, panel_h), (20, 20, 20))
+        panel.paste(inset, (pad, pad))
+        bar_y = pad * 2 + inset.height
+        bar = (colormaps["viridis"](np.linspace(0, 1, panel_w - 2 * pad))[:, :3] * 255).astype(np.uint8)
+        panel.paste(Image.fromarray(np.repeat(bar[None], bar_h, axis=0)), (pad, bar_y))
+        pdraw = ImageDraw.Draw(panel)
+        ty = bar_y + bar_h + 2
+        pdraw.text((pad, ty), f"{near:.1f} m", fill=(230, 230, 230), font=self.font)
+        pdraw.text((panel_w // 2 - 45, ty), "magenta = invalid", fill=(255, 120, 255), font=self.font)
+        pdraw.text((panel_w - pad - 40, ty), f"{far:.1f} m", fill=(230, 230, 230), font=self.font)
+        for i, line in enumerate(lines):
+            pdraw.text((pad, ty + text_h * (i + 1)), line, fill=(230, 230, 230), font=self.font)
+
+        out = frame.copy()
+        panel_np = np.asarray(panel)
+        h = min(panel_np.shape[0], out.shape[0] - 10)
+        w = min(panel_np.shape[1], out.shape[1] - 10)
+        out[10 : 10 + h, 10 : 10 + w] = panel_np[:h, :w]
+        return out
 
     def _relative_heights(self) -> tuple[np.ndarray, np.ndarray]:
         """Terrain height of every ray hit relative to the hit under the base, shape (ny, nx)."""
@@ -145,7 +212,8 @@ class HeightmapOverlay(gym.Wrapper):
         draw.line([cx, cy, cx, max(cy - 3 * c, 0)], fill=(255, 255, 255), width=2)
 
         pad, bar_h, text_h = 6, 10, 18
-        lines = [f"policy height map  ({self.x_extent[0]:+.1f}..{self.x_extent[1]:+.1f} m fwd)"]
+        who = "teacher (privileged)" if self.has_teacher else "policy"
+        lines = [f"{who} height map  ({self.x_extent[0]:+.1f}..{self.x_extent[1]:+.1f} m fwd)"]
         if self.label_fn is not None:
             lines.append(self.label_fn(self._step))
         text_w = max(int(self.font.getlength(line)) for line in lines)

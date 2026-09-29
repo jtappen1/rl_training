@@ -39,6 +39,10 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "r
 import cli_args  # noqa: E402
 
 parser = argparse.ArgumentParser(description="Evaluate an M20 checkpoint on a fixed-geometry stairs benchmark.")
+parser.add_argument(
+    "--clean_depth", action="store_true",
+    help="Depth-student tasks: turn off the depth noise / latency / frame drops (default: as trained).",
+)
 parser.add_argument("--checkpoint", type=str, required=True, help="Path to a model_*.pt file, or a run directory (the highest-iteration checkpoint in it is used).")
 parser.add_argument("--task", type=str, default="Rough-Deeprobotics-M20-v0", help="Registered task whose entry_point/robot config to reuse.")
 parser.add_argument("--speeds", type=float, nargs="+", default=[0.5, 1.0], help="Fixed forward command speeds to evaluate (m/s).")
@@ -70,7 +74,8 @@ parser.add_argument(
 )
 parser.add_argument(
     "--no_heightmap_viz", action="store_true", default=False,
-    help="With --video, do NOT draw the policy height map (3D ray-hit spheres + top-down inset) in the recording.",
+    help="With --video, do NOT draw the height map (3D ray-hit spheres + top-down inset) in the recording."
+    " A depth student's depth-input panel is still drawn.",
 )
 parser.add_argument("--seed", type=int, default=42)
 # append AppLauncher cli args
@@ -110,7 +115,6 @@ if version.parse(installed_version) < version.parse(RSL_RL_VERSION):
         f" ({RSL_RL_VERSION}). Continuing, but behaviour may differ."
     )
 
-from rsl_rl.runners import OnPolicyRunner
 
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
 from isaaclab_tasks.utils import load_cfg_from_registry
@@ -235,6 +239,8 @@ def build_env_cfg(combos: list[dict]) -> object:
 
     # match play.py: noise-free observations for evaluation
     env_cfg.observations.policy.enable_corruption = False
+    if args_cli.clean_depth and hasattr(env_cfg.observations, "depth"):
+        env_cfg.observations.depth.enable_corruption = False
 
     # Video camera: default to dynamically tracking one robot's root pose every frame (see
     # `isaaclab.envs.ui.viewport_camera_controller`'s `origin_type="asset_root"` handling) instead
@@ -327,7 +333,7 @@ def main():
 
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
 
-    if args_cli.video and not args_cli.no_heightmap_viz:
+    if args_cli.video:
         from heightmap_overlay import HeightmapOverlay
 
         viz_env_id = max(args_cli.follow_env_id, 0)
@@ -336,6 +342,7 @@ def main():
         env = HeightmapOverlay(
             env,
             env_id=viz_env_id,
+            show_heightmap=not args_cli.no_heightmap_viz,
             label_fn=lambda step: (
                 f"env {viz_env_id}: {viz_combo['direction']} h={viz_combo['step_height']:.2f} m"
                 f" tread={viz_combo['tread_width']:.2f} m  t={step * viz_dt:.1f} s"
@@ -354,18 +361,8 @@ def main():
 
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
-    train_cfg = agent_cfg.to_dict()
-    # RslRlOnPolicyRunnerCfg carries both the legacy `policy` field (which
-    # DeeproboticsM20RoughPPORunnerCfg actually populates) and newer, unset `actor`/`critic`
-    # fields (MISSING). Drop the MISSING ones so convert_rsl_rl_cfg_dict's "already new-format"
-    # short-circuit doesn't skip the policy->actor/critic conversion and leave them empty.
-    train_cfg.pop("actor", None)
-    train_cfg.pop("critic", None)
-    if version.parse(installed_version) >= version.parse("5.0.0"):
-        train_cfg = cli_args.convert_rsl_rl_cfg_dict(train_cfg)
-    ppo_runner = OnPolicyRunner(env, train_cfg, log_dir=None, device=agent_cfg.device)
-    ppo_runner.load(checkpoint_path)
-    policy = ppo_runner.get_inference_policy(device=env.unwrapped.device)
+    # PPO actor or distillation student (possibly recurrent -> reset on dones in the loop)
+    _, policy = cli_args.load_inference_policy(env, agent_cfg, checkpoint_path)
 
     # per-env combo bookkeeping, read back from the terrain importer's own (deterministic) column
     # assignment rather than recomputed independently, so it can never drift out of sync with it.
@@ -402,6 +399,7 @@ def main():
         cmd_term.cfg.ranges.lin_vel_x = (speed, speed)
 
         obs, _ = env.reset()
+        policy.reset()
         robot = env.unwrapped.scene["robot"]
         x0 = robot.data.root_pos_w[:, 0].clone()
         y0 = robot.data.root_pos_w[:, 1].clone()
@@ -427,6 +425,8 @@ def main():
             with torch.inference_mode():
                 actions = policy(obs)
             obs, _, dones, extras = env.step(actions)
+            with torch.inference_mode():
+                policy.reset(dones)  # recurrent students: clear state of envs that just reset
 
             time_outs = extras.get("time_outs", torch.zeros_like(dones, dtype=torch.bool))
             terminated = dones.bool() & ~time_outs.bool()
