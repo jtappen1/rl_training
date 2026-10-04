@@ -5,7 +5,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from isaaclab.utils import configclass
-from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
+from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg, RslRlSymmetryCfg
+
+from ..symmetry import compute_symmetric_states_lr
 
 
 @configclass
@@ -46,3 +48,35 @@ class DeeproboticsLite3FlatPPORunnerCfg(DeeproboticsLite3RoughPPORunnerCfg):
 
         self.max_iterations = 10000
         self.experiment_name = "deeprobotics_lite3_flat"
+
+
+@configclass
+class DeeproboticsLite3StairsSightedPPORunnerCfg(DeeproboticsLite3RoughPPORunnerCfg):
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.max_iterations = 6000
+        self.experiment_name = "deeprobotics_lite3_stairs_sighted"
+
+
+@configclass
+class DeeproboticsLite3StairsSightedV2PPORunnerCfg(DeeproboticsLite3StairsSightedPPORunnerCfg):
+    """v2: left-right symmetry augmentation (Mittal et al. 2024); see `symmetry.py` for why left-right only."""
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.experiment_name = "deeprobotics_lite3_stairs_sighted_v2"
+        self.algorithm.symmetry_cfg = RslRlSymmetryCfg(
+            use_data_augmentation=True, data_augmentation_func=compute_symmetric_states_lr
+        )
+
+
+@configclass
+class DeeproboticsLite3StairsSightedV3PPORunnerCfg(DeeproboticsLite3StairsSightedV2PPORunnerCfg):
+    """v3: same runner as v2 (left-right symmetry augmentation), own experiment dir, 20k iterations."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.experiment_name = "deeprobotics_lite3_stairs_sighted_v3"
+        self.max_iterations = 20000

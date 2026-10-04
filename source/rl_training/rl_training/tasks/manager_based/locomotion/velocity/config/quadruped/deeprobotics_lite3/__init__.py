@@ -34,3 +34,63 @@ gym.register(
     },
 )
 
+
+gym.register(
+    id="Stairs-Sighted-Deeprobotics-Lite3-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.stairs_env_cfg:DeeproboticsLite3StairsSightedEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:DeeproboticsLite3StairsSightedPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Stairs-Sighted-Deeprobotics-Lite3-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.stairs_env_cfg:DeeproboticsLite3StairsSightedEnvCfg_PLAY",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:DeeproboticsLite3StairsSightedPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Stairs-Sighted-V2-Deeprobotics-Lite3-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.stairs_env_cfg:DeeproboticsLite3StairsSightedV2EnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:DeeproboticsLite3StairsSightedV2PPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Stairs-Sighted-V2-Deeprobotics-Lite3-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.stairs_env_cfg:DeeproboticsLite3StairsSightedV2EnvCfg_PLAY",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:DeeproboticsLite3StairsSightedV2PPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Stairs-Sighted-V3-Deeprobotics-Lite3-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.stairs_env_cfg:DeeproboticsLite3StairsSightedV3EnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:DeeproboticsLite3StairsSightedV3PPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Stairs-Sighted-V3-Deeprobotics-Lite3-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.stairs_env_cfg:DeeproboticsLite3StairsSightedV3EnvCfg_PLAY",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:DeeproboticsLite3StairsSightedV3PPORunnerCfg",
+    },
+)

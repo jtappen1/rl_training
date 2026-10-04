@@ -21,6 +21,7 @@ import torch
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+import isaaclab.utils.math as math_utils
 from isaaclab.assets import Articulation
 from isaaclab.managers import ManagerTermBase, SceneEntityCfg
 from isaaclab.sensors import ContactSensor, RayCaster
@@ -42,7 +43,9 @@ __all__ = [
     "bad_orientation_stair_aware",
     "bad_orientation_stair_aware_penalty",
     "joint_pos_penalty_terrain_ahead",
+    "track_lin_vel_xy_stair_tolerant_exp",
     "stair_progress",
+    "stair_climb_bonus",
     "stair_wheel_clearance",
     "terrain_levels_stairs",
     "track_heading_exp",
@@ -213,6 +216,40 @@ def joint_pos_penalty_terrain_ahead(
 
 
 ##
+# Velocity tracking with a forward-speed allowance on stairs
+##
+
+
+def track_lin_vel_xy_stair_tolerant_exp(
+    env: ManagerBasedRLEnv,
+    std: float,
+    command_name: str,
+    task_ids_per_column: Sequence[int],
+    stair_task_ids: Sequence[int],
+    speed_tolerance: float = 0.25,
+    min_tolerance: float = 0.1,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """`track_lin_vel_xy_yaw_frame_exp`, but on stair tiles the speed error *along* the command gets a
+    deadband of +-max(speed_tolerance x |cmd|, min_tolerance): the robot may go a bit faster or slower
+    than commanded on stairs at no cost. The error across the command (sideways drift) is never
+    relaxed, and off the stairs the term is exactly the yaw-frame tracking reward."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    vel = math_utils.quat_apply_inverse(math_utils.yaw_quat(asset.data.root_quat_w), asset.data.root_lin_vel_w[:, :3])
+    cmd = env.command_manager.get_command(command_name)[:, :2]
+    err = cmd - vel[:, :2]
+    cmd_norm = torch.linalg.norm(cmd, dim=1)
+    moving = cmd_norm > 1.0e-3
+    direction = cmd / torch.clamp(cmd_norm, min=1.0e-6).unsqueeze(1)
+    e_along = torch.sum(err * direction, dim=1)
+    e_across_sq = torch.sum(torch.square(err), dim=1) - torch.square(e_along)
+    tolerance = torch.clamp(speed_tolerance * cmd_norm, min=min_tolerance)
+    relax = env_task_mask(env, task_ids_per_column, stair_task_ids) & moving
+    e_along = torch.where(relax, torch.clamp(torch.abs(e_along) - tolerance, min=0.0), e_along)
+    return torch.exp(-(torch.square(e_along) + torch.clamp(e_across_sq, min=0.0)) / std**2)
+
+
+##
 # Stair progress + wheel clearance
 ##
 
@@ -226,6 +263,11 @@ class stair_progress(ManagerTermBase):
     weight reads as "reward per metre of progress". Only paid on stair tiles, when the command is
     non-trivial, scaled by how well the command points outward (so it never pays for ignoring a
     sideways command).
+
+    With `cap_to_command`, each step's credited distance gain is capped at cap_factor x |command| x step_dt (the
+    height gain is scaled down in the same ratio), as Extreme Parkour caps its progress reward at the
+    commanded speed: progress made faster than commanded is lost for good (the episode-best still
+    moves), so sprinting earns less in total, not just the same reward sooner.
     """
 
     def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
@@ -251,6 +293,8 @@ class stair_progress(ManagerTermBase):
         max_distance: float,
         height_scale: float = 1.0,
         command_threshold: float = 0.1,
+        cap_to_command: bool = False,
+        cap_factor: float = 1.0,
         asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     ) -> torch.Tensor:
         dist = torch.clamp(chebyshev_distance_from_origin(env, self.asset), max=max_distance)
@@ -267,11 +311,79 @@ class stair_progress(ManagerTermBase):
 
         ascent = env_task_mask(env, task_ids_per_column, ascent_task_ids)
         stairs = ascent | env_task_mask(env, task_ids_per_column, descent_task_ids)
-        cmd_active = torch.linalg.norm(env.command_manager.get_command(command_name)[:, :2], dim=1) > command_threshold
+        cmd_speed = torch.linalg.norm(env.command_manager.get_command(command_name)[:, :2], dim=1)
+        cmd_active = cmd_speed > command_threshold
         align = _outward_alignment(env, self.asset, command_name)
 
         gain = gain_dist + height_scale * gain_z * ascent.float()
+        if cap_to_command:
+            allowed = cap_factor * cmd_speed * env.step_dt
+            gain = gain * torch.clamp(allowed / torch.clamp(gain_dist, min=1e-6), max=1.0)
         return gain * stairs.float() * cmd_active.float() * align / env.step_dt
+
+
+class stair_climb_bonus(ManagerTermBase):
+    """One-off bonus for finishing a stair flight at the commanded pace (sparse partner of `stair_progress`).
+
+    The climb starts when the robot root first gets `start_distance` (L-inf) out of the tile centre
+    (the inner edge of the flight) and finishes at `finish_distance` (the outer edge). Meanwhile the
+    term integrates the commanded speed along the tile's outward axis ("commanded progress").
+    Efficiency = min(actual, commanded) / max(actual, commanded) progress, so both dawdling and
+    overrunning the command lower it, and climbing while commanded to stand still scores ~0.
+    With `penalize_slow=False` only overrunning counts (efficiency = min(1, commanded / actual)):
+    reaching the top at or below the commanded pace pays in full, however slowly.
+    Payout ramps linearly from 0 at `min_efficiency` to 1 at `full_efficiency`, paid once per
+    episode on the finishing step, returned divided by step_dt so the term weight is the payout.
+    Envs that fall are terminated before finishing and get nothing.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
+        super().__init__(cfg, env)
+        self.asset: Articulation = env.scene[cfg.params.get("asset_cfg", SceneEntityCfg("robot")).name]
+        self.started = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        self.done = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        self.commanded = torch.zeros(env.num_envs, device=env.device)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        ids = slice(None) if env_ids is None else env_ids
+        self.started[ids] = False
+        self.done[ids] = False
+        self.commanded[ids] = 0.0
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        command_name: str,
+        task_ids_per_column: Sequence[int],
+        task_ids: Sequence[int],
+        start_distance: float,
+        finish_distance: float,
+        min_efficiency: float = 0.5,
+        full_efficiency: float = 0.9,
+        penalize_slow: bool = True,
+        asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    ) -> torch.Tensor:
+        on_task = env_task_mask(env, task_ids_per_column, task_ids)
+        dist = chebyshev_distance_from_origin(env, self.asset)
+
+        self.started |= on_task & (dist >= start_distance)
+        climbing = self.started & ~self.done
+        cmd_speed = torch.linalg.norm(env.command_manager.get_command(command_name)[:, :2], dim=1)
+        outward_cmd = cmd_speed * _outward_alignment(env, self.asset, command_name)
+        self.commanded += torch.where(climbing, outward_cmd * env.step_dt, 0.0)
+
+        finished = climbing & (dist >= finish_distance)
+        self.done |= finished
+
+        actual = finish_distance - start_distance
+        if penalize_slow:
+            efficiency = torch.minimum(self.commanded, torch.full_like(self.commanded, actual)) / torch.clamp(
+                torch.maximum(self.commanded, torch.full_like(self.commanded, actual)), min=1e-6
+            )
+        else:
+            efficiency = torch.clamp(self.commanded / actual, max=1.0)
+        payout = torch.clamp((efficiency - min_efficiency) / (full_efficiency - min_efficiency), 0.0, 1.0)
+        return payout * finished.float() / env.step_dt
 
 
 def stair_wheel_clearance(
