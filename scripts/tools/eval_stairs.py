@@ -77,6 +77,16 @@ parser.add_argument(
     help="With --video, do NOT draw the height map (3D ray-hit spheres + top-down inset) in the recording."
     " A depth student's depth-input panel is still drawn.",
 )
+parser.add_argument(
+    "--blind_policy", action="store_true", default=False,
+    help="Drop `height_scan` from the policy observations, to run a blind checkpoint (e.g. the Lite3 rough"
+    " policy) on a sighted task's config -- the scan is still simulated, so the video overlay still shows it.",
+)
+parser.add_argument(
+    "--front_offset", type=float, default=None,
+    help="Distance (m) from the root to the front feet/wheels, for detecting stair entry. Default: measured"
+    " from the robot's front-most foot body after the first reset (M20 wheels ~0.4 m, Lite3 feet ~0.15 m).",
+)
 parser.add_argument("--seed", type=int, default=42)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -137,9 +147,6 @@ from rl_training.tasks.manager_based.locomotion.velocity.config.wheeled.deeprobo
 # Extra clearance past the last riser so the whole ~0.82 m-long M20 body (not just the root) has
 # cleared the stairs before we call it a crossing.
 ROBOT_LENGTH_MARGIN = 0.3
-
-# Front wheel axle is ~0.4 m ahead of the root on the 0.82 m-long M20.
-FRONT_WHEEL_OFFSET = 0.4
 
 
 def _yaw(quat_wxyz: torch.Tensor) -> torch.Tensor:
@@ -239,6 +246,8 @@ def build_env_cfg(combos: list[dict]) -> object:
 
     # match play.py: noise-free observations for evaluation
     env_cfg.observations.policy.enable_corruption = False
+    if args_cli.blind_policy:
+        env_cfg.observations.policy.height_scan = None
     if args_cli.clean_depth and hasattr(env_cfg.observations, "depth"):
         env_cfg.observations.depth.enable_corruption = False
 
@@ -362,7 +371,7 @@ def main():
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
     # PPO actor or distillation student (possibly recurrent -> reset on dones in the loop)
-    _, policy = cli_args.load_inference_policy(env, agent_cfg, checkpoint_path)
+    _, policy = cli_args.load_inference_policy(env, agent_cfg, checkpoint_path, actor_only=args_cli.blind_policy)
 
     # per-env combo bookkeeping, read back from the terrain importer's own (deterministic) column
     # assignment rather than recomputed independently, so it can never drift out of sync with it.
@@ -388,6 +397,15 @@ def main():
     non_wheel_ids, _ = contact_sensor.find_bodies(f"^(?!.*{env_cfg.foot_link_name}).*")
     wheel_ids_t = torch.tensor(wheel_ids, device=device, dtype=torch.long)
     non_wheel_ids_t = torch.tensor(non_wheel_ids, device=device, dtype=torch.long)
+
+    # how far ahead of the root the front feet/wheels sit, measured in the spawn pose (yaw 0)
+    front_offset = args_cli.front_offset
+    if front_offset is None:
+        robot = env.unwrapped.scene["robot"]
+        foot_ids, _ = robot.find_bodies(env_cfg.foot_link_name)
+        foot_x = robot.data.body_pos_w[:, foot_ids, 0] - robot.data.root_pos_w[:, 0:1]
+        front_offset = float(foot_x.max(dim=1).values.mean())
+    print(f"[INFO] Front feet/wheels {front_offset:.2f} m ahead of the root")
 
     step_dt = env.unwrapped.step_dt
     horizon_steps = int(round(args_cli.time_out_s / step_dt))
@@ -444,10 +462,10 @@ def main():
 
             progress = robot.data.root_pos_w[:, 0] - x0
             # heading / sideways drift, frozen once a trial is finalized (so post-crossing motion
-            # doesn't count); stair entry = front wheels (~0.4 m ahead of the root) at the first riser
+            # doesn't count); stair entry = front feet/wheels (`front_offset` ahead of the root) at the first riser
             yaw_now = _yaw(robot.data.root_quat_w)
             live = ~finalized
-            entered = live & torch.isnan(yaw_at_entry) & (progress >= stair_start_x - FRONT_WHEEL_OFFSET)
+            entered = live & torch.isnan(yaw_at_entry) & (progress >= stair_start_x - front_offset)
             yaw_at_entry = torch.where(entered, yaw_now, yaw_at_entry)
             yaw_end = torch.where(live, yaw_now, yaw_end)
             y_end = torch.where(live, robot.data.root_pos_w[:, 1], y_end)

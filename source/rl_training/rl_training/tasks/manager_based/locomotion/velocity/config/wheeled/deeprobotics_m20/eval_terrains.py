@@ -127,6 +127,36 @@ DEFAULT_COURSE = [
     dict(kind="descent", step_height=0.30, steps=4, tread=0.35),
     dict(kind="flat", length=5.0),
 ]
+# Lite3 version: steps up to the 0.18 m training maximum, Lite3-sized rough/slopes, shorter landings
+# (the robot is ~0.6 m long).
+LITE3_COURSE = [
+    dict(kind="flat", length=4.0),
+    dict(kind="ascent", step_height=0.08, steps=4, tread=0.27),
+    dict(kind="landing", length=1.5),
+    dict(kind="descent", step_height=0.08, steps=4, tread=0.27),
+    dict(kind="flat", length=2.0),
+    dict(kind="rough", length=3.0, max_height=0.04),
+    dict(kind="flat", length=2.0),
+    dict(kind="ascent", step_height=0.12, steps=5, tread=0.27),
+    dict(kind="landing", length=1.5),
+    dict(kind="descent", step_height=0.12, steps=5, tread=0.27),
+    dict(kind="flat", length=2.0),
+    dict(kind="slope", length=3.0, grade=0.2),
+    dict(kind="landing", length=1.5),
+    dict(kind="slope", length=3.0, grade=-0.2),
+    dict(kind="flat", length=2.0),
+    dict(kind="rough", length=3.0, max_height=0.06),
+    dict(kind="flat", length=2.0),
+    dict(kind="ascent", step_height=0.15, steps=6, tread=0.27),
+    dict(kind="landing", length=1.5),
+    dict(kind="descent", step_height=0.15, steps=6, tread=0.27),
+    dict(kind="flat", length=2.0),
+    dict(kind="ascent", step_height=0.18, steps=6, tread=0.27),
+    dict(kind="landing", length=1.5),
+    dict(kind="descent", step_height=0.18, steps=6, tread=0.27),
+    dict(kind="flat", length=4.0),
+]
+COURSES = {"m20": DEFAULT_COURSE, "lite3": LITE3_COURSE}
 COURSE_WIDTH = 8.0
 COURSE_BORDER_WIDTH = 6.0
 START_X = 2.0  # robot root spawn, metres into the first flat segment

@@ -45,6 +45,7 @@ parser.add_argument("--checkpoint", type=str, required=True, help="model_*.pt, o
 parser.add_argument("--task", type=str, default="Stairs-Sighted-V2-Deeprobotics-M20-v0")
 parser.add_argument("--speed", type=float, default=0.7, help="Fixed forward command (m/s).")
 parser.add_argument("--steering", choices=["straight", "heading_hold"], default="straight")
+parser.add_argument("--course", choices=["m20", "lite3"], default="m20", help="Course layout (eval_terrains.COURSES).")
 parser.add_argument("--friction", type=float, default=1.0, help="Fixed ground/wheel friction (replaces the DR range).")
 parser.add_argument("--max_time_s", type=float, default=None, help="Time budget; default 1.6 x course length / speed.")
 parser.add_argument("--stuck_time_s", type=float, default=8.0, help="End the run if < 0.2 m of progress in this long.")
@@ -85,7 +86,7 @@ from isaaclab_tasks.utils import load_cfg_from_registry
 import rl_training.tasks  # noqa: F401
 from rl_training.tasks.manager_based.locomotion.velocity.config.wheeled.deeprobotics_m20.eval_terrains import (
     COURSE_WIDTH,
-    DEFAULT_COURSE,
+    COURSES,
     START_X,
     build_course_generator,
     layout,
@@ -126,7 +127,7 @@ def build_env_cfg(course_len: float, time_budget: float):
     env_cfg.seed = args_cli.seed
     env_cfg.episode_length_s = time_budget + 5.0
 
-    env_cfg.scene.terrain.terrain_generator = build_course_generator(DEFAULT_COURSE, args_cli.seed)
+    env_cfg.scene.terrain.terrain_generator = build_course_generator(COURSES[args_cli.course], args_cli.seed)
     env_cfg.scene.terrain.max_init_terrain_level = 0
     for name in ("terrain_levels", "gait_level", "command_levels", "terrain_level_flat_rough",
                  "terrain_level_stair_ascent", "terrain_level_stair_descent"):
@@ -242,7 +243,7 @@ def write_plot(path: str, segs: list[dict], traj: list[dict], end_note: str) -> 
 
 
 def main():
-    segs = layout(DEFAULT_COURSE)
+    segs = layout(COURSES[args_cli.course])
     course_len = segs[-1]["x1"]
     finish_x = course_len - FINISH_MARGIN
     time_budget = args_cli.max_time_s or 1.6 * (finish_x - START_X) / max(args_cli.speed, 0.1)
@@ -274,13 +275,20 @@ def main():
     wheel_ids = torch.tensor(contact.find_bodies(env_cfg.foot_link_name)[0], device=base_env.device)
     body_ids = torch.tensor(contact.find_bodies(f"^(?!.*{env_cfg.foot_link_name}).*")[0], device=base_env.device)
     # per-wheel logging, in a fixed fl/fr/hl/hr order on both the contact sensor and the joints
+    # (wheeled robots only: legged robots like the Lite3 skip the wheel logging and its report table)
     wheel_tags = ["fl", "fr", "hl", "hr"]
-    wheel_body_ids = torch.tensor(
-        contact.find_bodies([f"{w}_wheel" for w in wheel_tags], preserve_order=True)[0], device=base_env.device
-    )
-    wheel_joint_ids = torch.tensor(
-        robot.find_joints([f"{w}_wheel_joint" for w in wheel_tags], preserve_order=True)[0], device=base_env.device
-    )
+    try:
+        wheel_body_ids = torch.tensor(
+            contact.find_bodies([f"{w}_wheel" for w in wheel_tags], preserve_order=True)[0], device=base_env.device
+        )
+        wheel_joint_ids = torch.tensor(
+            robot.find_joints([f"{w}_wheel_joint" for w in wheel_tags], preserve_order=True)[0], device=base_env.device
+        )
+        has_wheels = len(wheel_body_ids) == 4 and len(wheel_joint_ids) == 4
+    except ValueError:
+        has_wheels = False
+    if not has_wheels:
+        wheel_tags = []
     dt = base_env.step_dt
 
     obs, _ = env.reset()
@@ -336,10 +344,11 @@ def main():
         stumble = bool(torch.any(torch.linalg.norm(f[wheel_ids, :2], dim=-1) > 4.0 * f[wheel_ids, 2].abs()))
         # rim speed = |wheel angular velocity| x radius; grounded = in contact; on_riser = pressed
         # against a vertical face (same test as the stumble metric)
-        rim = (robot.data.joint_vel[0, wheel_joint_ids].abs() * WHEEL_RADIUS).tolist()
-        grounded = (contact.data.current_contact_time[0, wheel_body_ids] > 0.0).tolist()
-        fw = f[wheel_body_ids]
-        on_riser = (torch.linalg.norm(fw[:, :2], dim=-1) > 4.0 * fw[:, 2].abs()).tolist()
+        if has_wheels:
+            rim = (robot.data.joint_vel[0, wheel_joint_ids].abs() * WHEEL_RADIUS).tolist()
+            grounded = (contact.data.current_contact_time[0, wheel_body_ids] > 0.0).tolist()
+            fw = f[wheel_body_ids]
+            on_riser = (torch.linalg.norm(fw[:, :2], dim=-1) > 4.0 * fw[:, 2].abs()).tolist()
         base_speed = torch.linalg.norm(robot.data.root_lin_vel_w[0, :2]).item()
         collide = bool(torch.any(torch.linalg.norm(f[body_ids], dim=-1) > 1.0))
 
@@ -423,7 +432,17 @@ def main():
             f" {ps['y_out'] - ps['y_in']:+.2f} | {ps['stumbles']} | {ps['collisions']} | {ps['max_pitch']:.0f} |"
             f" {ps['max_roll']:.0f} |"
         )
-    lines += [
+    if has_wheels:
+        lines += wheel_report_lines(segs, traj, wheel_tags)
+    lines += ["", "Files: `course.mp4` (if recorded), `course_plot.png`, `trajectory.csv`."]
+    with open(os.path.join(run_dir, "report.md"), "w") as fmd:
+        fmd.write("\n".join(lines) + "\n")
+    print(f"[INFO] {end_note}")
+    print(f"[INFO] wrote {run_dir}")
+
+
+def wheel_report_lines(segs: list[dict], traj: list[dict], wheel_tags: list[str]) -> list[str]:
+    lines = [
         "",
         "## Wheel use per segment",
         "",
@@ -454,11 +473,7 @@ def main():
             f" {100 * stopped:.0f}% | {100 * len(air) / n_wheel:.0f}% | {mean(air):.2f} |"
             f" {100 * len(riser) / n_wheel:.0f}% | {mean(riser):.2f} |"
         )
-    lines += ["", "Files: `course.mp4` (if recorded), `course_plot.png`, `trajectory.csv`."]
-    with open(os.path.join(run_dir, "report.md"), "w") as fmd:
-        fmd.write("\n".join(lines) + "\n")
-    print(f"[INFO] {end_note}")
-    print(f"[INFO] wrote {run_dir}")
+    return lines
 
 
 if __name__ == "__main__":

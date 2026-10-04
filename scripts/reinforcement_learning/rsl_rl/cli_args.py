@@ -176,7 +176,7 @@ def convert_rsl_rl_cfg_dict(cfg_dict: dict) -> dict:
     return cfg_dict
 
 
-def load_inference_policy(env, agent_cfg, checkpoint_path: str, device: str | None = None):
+def load_inference_policy(env, agent_cfg, checkpoint_path: str, device: str | None = None, actor_only: bool = False):
     """Build the right rsl-rl runner for `agent_cfg`, load `checkpoint_path`, return (runner, policy).
 
     Handles PPO (`OnPolicyRunner`) and distillation (`DistillationRunner`, where the policy is the
@@ -187,6 +187,9 @@ def load_inference_policy(env, agent_cfg, checkpoint_path: str, device: str | No
     The returned policy may be recurrent: call `policy.reset(dones)` after every env step (inside
     `torch.inference_mode()` if the forward pass ran in it) and `policy.reset()` after `env.reset()`.
     It is a no-op for MLP policies.
+
+    `actor_only` (PPO only) loads just the actor weights, for running a checkpoint whose critic
+    observations no longer match the env's (e.g. a blind policy on a task with a different height scan).
     """
     import torch
     from rsl_rl.runners import DistillationRunner, OnPolicyRunner
@@ -210,5 +213,5 @@ def load_inference_policy(env, agent_cfg, checkpoint_path: str, device: str | No
             )
     runner_class = DistillationRunner if is_distillation else OnPolicyRunner
     runner = runner_class(env, train_cfg, log_dir=None, device=agent_cfg.device)
-    runner.load(checkpoint_path)
+    runner.load(checkpoint_path, load_cfg={"actor": True} if actor_only and not is_distillation else None)
     return runner, runner.get_inference_policy(device=device or env.unwrapped.device)

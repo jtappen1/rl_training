@@ -78,15 +78,17 @@ class HeightmapOverlay(gym.Wrapper):
         self.sensor = self.env.unwrapped.scene.sensors[sensor_name]
         pattern = self.sensor.cfg.pattern_cfg
         res = pattern.resolution
-        self.nx = int(round(pattern.size[0] / res)) + 1
-        self.ny = int(round(pattern.size[1] / res)) + 1
+        # same point count as isaaclab's grid_pattern (arange up to size/2 + 1e-9), which need not
+        # reach the far edge when `res` does not divide `size`
+        self.nx = len(np.arange(-pattern.size[0] / 2, pattern.size[0] / 2 + 1.0e-9, res))
+        self.ny = len(np.arange(-pattern.size[1] / 2, pattern.size[1] / 2 + 1.0e-9, res))
         if self.nx * self.ny != self.sensor.num_rays or pattern.ordering != "xy":
             raise ValueError("HeightmapOverlay expects a GridPatternCfg with 'xy' ordering.")
         # grid cell containing the sensor origin (the robot base), in pattern coordinates
         off_x, off_y = self.sensor.cfg.offset.pos[0], self.sensor.cfg.offset.pos[1]
         self.base_ix = int(np.clip(round((pattern.size[0] / 2 - off_x) / res), 0, self.nx - 1))
         self.base_iy = int(np.clip(round((pattern.size[1] / 2 - off_y) / res), 0, self.ny - 1))
-        self.x_extent = (-pattern.size[0] / 2 + off_x, pattern.size[0] / 2 + off_x)
+        self.x_extent = (-pattern.size[0] / 2 + off_x, -pattern.size[0] / 2 + (self.nx - 1) * res + off_x)
 
         self.cmap = colormaps["turbo"]
         bin_colors = self.cmap(np.linspace(0.0, 1.0, NUM_COLOR_BINS))[:, :3]
