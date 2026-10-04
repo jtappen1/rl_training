@@ -59,3 +59,6 @@ class CameraMount:
 
 D435I = D435iSpec()
 M20_D435I_MOUNT = CameraMount()
+# Lite3: just ahead of the 0.5 m torso box (front face at x = +0.25), ~0.36 m above the ground when
+# standing; at 40 deg down the image covers roughly 0.4-2 m of ground ahead of the base. PLACEHOLDER.
+LITE3_D435I_MOUNT = CameraMount(pos=(0.26, 0.0, 0.03), pitch_down_deg=40.0)

@@ -11,6 +11,8 @@ other change is a weight change or a swap to an existing stair-aware variant of 
 
 from __future__ import annotations
 
+import copy
+
 import isaaclab.terrains as terrain_gen
 from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -22,14 +24,17 @@ from isaaclab.utils import configclass
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
 import rl_training.tasks.manager_based.locomotion.velocity.mdp as mdp
+from rl_training.depth import LITE3_D435I_MOUNT
 from rl_training.tasks.manager_based.locomotion.velocity.config.wheeled.deeprobotics_m20.stairs_env_cfg import (
     TASK_FLAT_ROUGH,
     TASK_STAIR_ASCENT,
     TASK_STAIR_DESCENT,
+    add_d435i_camera,
     set_task_ids_per_column,
     task_id_per_column,
 )
 
+from .domain_rand import add_proprio_latency, apply_full_domain_rand
 from .rough_env_cfg import DeeproboticsLite3RoughEnvCfg
 
 ##
@@ -107,6 +112,29 @@ def build_lite3_stairs_terrain_generator() -> TerrainGeneratorCfg:
         curriculum=True,
         sub_terrains=sub_terrains,
     )
+
+
+def build_lite3_stairs_terrain_generator_v4() -> TerrainGeneratorCfg:
+    """v4 mix: stairs 40% (ascent 20 / descent 10 / narrow-tread ascent 6 / wide-tread descent 4),
+    random rough 20%, boxes 10%, slopes 15%, flat 15%. Same stair geometry as v1-v3."""
+    gen = build_lite3_stairs_terrain_generator()
+    sub = gen.sub_terrains
+    for key, proportion in (
+        ("stair_ascent", 0.20),
+        ("stair_descent", 0.10),
+        ("stair_ascent_narrow_tread", 0.06),
+        ("stair_descent_wide_tread", 0.04),
+        ("random_rough", 0.20),
+        ("hf_pyramid_slope", 0.075),
+        ("hf_pyramid_slope_inv", 0.075),
+        ("flat", 0.15),
+    ):
+        sub[key].proportion = proportion
+    # blocky ground (the course's rough patch the v2/v3 teachers stumbled on): 0.3 m cells, 2-8 cm high
+    sub["boxes"] = terrain_gen.MeshRandomGridTerrainCfg(
+        proportion=0.10, grid_width=0.3, grid_height_range=(0.02, 0.08), platform_width=1.5
+    )
+    return gen
 
 
 def configure_lite3_height_scan(env_cfg) -> None:
@@ -387,3 +415,125 @@ class DeeproboticsLite3StairsSightedV3EnvCfg_PLAY(DeeproboticsLite3StairsSighted
         cmd.rel_only_lin_x_envs = 0.0
         cmd.rel_only_lin_y_envs = 0.0
         cmd.rel_only_ang_z_envs = 0.0
+
+
+##
+# v4 teacher and depth students
+##
+
+
+@configclass
+class DeeproboticsLite3StairsSightedV4EnvCfg(DeeproboticsLite3StairsSightedV3EnvCfg):
+    """v4 teacher: v3's rewards on the v4 terrain mix (40% stairs, more rough/boxes/slopes/flat), with
+    the full sim-to-real domain randomization (`domain_rand.apply_full_domain_rand`: payload, pushes,
+    motor strength, 0-20 ms actuator delay, 0-20 ms proprioception latency)."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.terrain.terrain_generator = build_lite3_stairs_terrain_generator_v4()
+        set_task_ids_per_column(self, task_id_per_column(self.scene.terrain.terrain_generator))
+        apply_full_domain_rand(self)
+
+
+@configclass
+class DeeproboticsLite3StairsSightedV4EnvCfg_PLAY(DeeproboticsLite3StairsSightedV4EnvCfg):
+    """Play/video variant: fewer envs, no pushes, fixed forward command."""
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.scene.num_envs = 50
+        self.scene.env_spacing = 2.5
+        self.observations.policy.enable_corruption = False
+        self.events.randomize_push_robot = None
+
+        if self.scene.terrain.terrain_generator is not None:
+            self.scene.terrain.terrain_generator.num_rows = 5
+            self.scene.terrain.terrain_generator.num_cols = 8
+            set_task_ids_per_column(self, task_id_per_column(self.scene.terrain.terrain_generator))
+        self.scene.terrain.max_init_terrain_level = None
+
+        cmd = self.commands.base_velocity
+        cmd.ranges.lin_vel_x = (0.5, 0.5)
+        cmd.ranges.lin_vel_y = (0.0, 0.0)
+        cmd.ranges.ang_vel_z = (0.0, 0.0)
+        cmd.rel_standing_envs = 0.0
+        cmd.rel_zero_vel_envs = 0.0
+        cmd.rel_only_lin_x_envs = 0.0
+        cmd.rel_only_lin_y_envs = 0.0
+        cmd.rel_only_ang_z_envs = 0.0
+
+
+def make_depth_student(env_cfg) -> None:
+    """Turn a sighted teacher env into a depth-student env for DAgger distillation.
+
+    - `teacher`: the teacher's own `policy` observations, copied before anything below changes them
+      (height scan included, noise off), so the frozen actor loads strictly and sees what it trained on;
+    - `policy`: the student's proprioception = the teacher's minus the height scan;
+    - `depth`: (N, 1, 36, 64) RealSense D435i image with the full sensor model (stereo occlusion,
+      disparity noise, holes, 20-60 ms latency, mount jitter; docs/depth_pipeline.md), from the
+      placeholder Lite3 mount `rl_training.depth.LITE3_D435I_MOUNT`.
+    """
+    add_d435i_camera(env_cfg, mount=LITE3_D435I_MOUNT)
+    teacher = copy.deepcopy(env_cfg.observations.policy)
+    teacher.enable_corruption = False
+    env_cfg.observations.teacher = teacher
+    env_cfg.observations.policy.height_scan = None
+
+
+@configclass
+class DeeproboticsLite3StairsStudentEnvCfg(DeeproboticsLite3StairsSightedV3EnvCfg):
+    """Stage A depth student, distilled from the frozen v3 teacher (model_19999).
+
+    Terrain is the v4 mix. Only randomization the teacher's actions stay valid under is added: the
+    depth sensor model (`make_depth_student`) and 0-20 ms latency on the student's proprioception
+    (the teacher's copy has none). Dynamics randomization (payload, pushes, motor strength, actuator
+    delay) waits for the v4 teacher: see `DeeproboticsLite3StairsStudentV4EnvCfg`.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.terrain.terrain_generator = build_lite3_stairs_terrain_generator_v4()
+        set_task_ids_per_column(self, task_id_per_column(self.scene.terrain.terrain_generator))
+        make_depth_student(self)
+        add_proprio_latency(self.observations.policy)
+
+
+@configclass
+class DeeproboticsLite3StairsStudentEnvCfg_PLAY(DeeproboticsLite3StairsStudentEnvCfg):
+    """Play/video variant: fewer envs, fixed forward command, clean depth and proprioception."""
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.scene.num_envs = 50
+        self.scene.env_spacing = 2.5
+        self.observations.policy.enable_corruption = False
+        self.observations.depth.enable_corruption = False
+        self.events.randomize_depth_camera_offset = None
+
+        if self.scene.terrain.terrain_generator is not None:
+            self.scene.terrain.terrain_generator.num_rows = 5
+            self.scene.terrain.terrain_generator.num_cols = 8
+            set_task_ids_per_column(self, task_id_per_column(self.scene.terrain.terrain_generator))
+        self.scene.terrain.max_init_terrain_level = None
+
+        cmd = self.commands.base_velocity
+        cmd.ranges.lin_vel_x = (0.5, 0.5)
+        cmd.ranges.lin_vel_y = (0.0, 0.0)
+        cmd.ranges.ang_vel_z = (0.0, 0.0)
+        cmd.rel_standing_envs = 0.0
+        cmd.rel_zero_vel_envs = 0.0
+        cmd.rel_only_lin_x_envs = 0.0
+        cmd.rel_only_lin_y_envs = 0.0
+        cmd.rel_only_ang_z_envs = 0.0
+
+
+@configclass
+class DeeproboticsLite3StairsStudentV4EnvCfg(DeeproboticsLite3StairsSightedV4EnvCfg):
+    """Stage B depth student, distilled from a v4 teacher: the v4 env (terrain mix + full domain
+    randomization, the teacher trained with the same proprioception latency) plus the depth sensor."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        make_depth_student(self)

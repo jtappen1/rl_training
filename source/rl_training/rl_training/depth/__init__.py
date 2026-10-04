@@ -7,5 +7,5 @@
 `stereo_noise.py` is simulator-only.
 """
 
-from .d435i import D435I, M20_D435I_MOUNT, CameraMount, D435iSpec
+from .d435i import D435I, LITE3_D435I_MOUNT, M20_D435I_MOUNT, CameraMount, D435iSpec
 from .preprocess import normalize, pool_depth, preprocess, sanitize

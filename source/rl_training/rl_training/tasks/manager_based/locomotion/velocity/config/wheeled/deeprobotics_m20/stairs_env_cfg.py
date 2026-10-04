@@ -64,6 +64,7 @@ SUB_TERRAIN_TASK = {
     "hf_pyramid_slope": TASK_FLAT_ROUGH,
     "hf_pyramid_slope_inv": TASK_FLAT_ROUGH,
     "flat": TASK_FLAT_ROUGH,
+    "boxes": TASK_FLAT_ROUGH,  # Lite3 v4 mix
 }
 
 

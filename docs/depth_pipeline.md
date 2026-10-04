@@ -8,7 +8,7 @@ Code:
 
 | File | Runs on | What |
 |---|---|---|
-| `source/rl_training/rl_training/depth/d435i.py` | both | `D435iSpec` (stream, FOV, range, timing) and `CameraMount` (pose on the M20) |
+| `source/rl_training/rl_training/depth/d435i.py` | both | `D435iSpec` (stream, FOV, range, timing) and `CameraMount` (pose on the robot: `M20_D435I_MOUNT`, `LITE3_D435I_MOUNT`) |
 | `source/rl_training/rl_training/depth/preprocess.py` | both | `preprocess()`: sanitize, zero-ignoring median pool, normalize |
 | `source/rl_training/rl_training/depth/stereo_noise.py` | sim | stereo occlusion, disparity noise, random holes |
 | `.../velocity/mdp/depth_d435i.py` | sim | Isaac Lab observation term + mount-jitter event |
@@ -69,7 +69,8 @@ stays on because it is geometry, not noise.
 ## Open items / VERIFY on the real unit
 
 - [ ] **Mount pose.** `M20_D435I_MOUNT` is still the placeholder (0.38 m forward, 0.05 m up, 40 deg
-      down). Measure the real bracket.
+      down), and so is `LITE3_D435I_MOUNT` (0.26 m forward, 0.03 m up, 40 deg down, just ahead of the
+      torso box; used by `Stairs-Student-Deeprobotics-Lite3-v0`). Measure the real brackets.
 - [ ] **Self-occlusion.** The ray caster only sees `/World/ground`. If the M20's front wheels or legs
       are in the image at the real mount, model it: a fixed mask, or Isaac Lab's
       `MultiMeshRayCasterCamera`, which can also hit the robot's own meshes.

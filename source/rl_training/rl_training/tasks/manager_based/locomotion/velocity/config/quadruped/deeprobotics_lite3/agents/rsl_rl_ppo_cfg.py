@@ -80,3 +80,12 @@ class DeeproboticsLite3StairsSightedV3PPORunnerCfg(DeeproboticsLite3StairsSighte
         super().__post_init__()
         self.experiment_name = "deeprobotics_lite3_stairs_sighted_v3"
         self.max_iterations = 20000
+
+
+@configclass
+class DeeproboticsLite3StairsSightedV4PPORunnerCfg(DeeproboticsLite3StairsSightedV3PPORunnerCfg):
+    """v4 teacher: same runner as v3 (symmetry augmentation, 20k iterations), own experiment dir."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.experiment_name = "deeprobotics_lite3_stairs_sighted_v4"

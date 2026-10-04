@@ -94,3 +94,53 @@ gym.register(
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:DeeproboticsLite3StairsSightedV3PPORunnerCfg",
     },
 )
+
+gym.register(
+    id="Stairs-Sighted-V4-Deeprobotics-Lite3-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.stairs_env_cfg:DeeproboticsLite3StairsSightedV4EnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:DeeproboticsLite3StairsSightedV4PPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Stairs-Sighted-V4-Deeprobotics-Lite3-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.stairs_env_cfg:DeeproboticsLite3StairsSightedV4EnvCfg_PLAY",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:DeeproboticsLite3StairsSightedV4PPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Stairs-Student-Deeprobotics-Lite3-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.stairs_env_cfg:DeeproboticsLite3StairsStudentEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_distillation_cfg:DeeproboticsLite3StairsStudentRunnerCfg",
+    },
+)
+
+gym.register(
+    id="Stairs-Student-Deeprobotics-Lite3-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.stairs_env_cfg:DeeproboticsLite3StairsStudentEnvCfg_PLAY",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_distillation_cfg:DeeproboticsLite3StairsStudentRunnerCfg",
+    },
+)
+
+gym.register(
+    id="Stairs-Student-V4-Deeprobotics-Lite3-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.stairs_env_cfg:DeeproboticsLite3StairsStudentV4EnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_distillation_cfg:DeeproboticsLite3StairsStudentV4RunnerCfg",
+    },
+)
