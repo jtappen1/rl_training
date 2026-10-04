@@ -18,6 +18,7 @@ import torch
 
 import isaaclab.terrains as terrain_gen
 from isaaclab.managers import CurriculumTermCfg as CurrTerm
+from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
@@ -29,6 +30,7 @@ from isaaclab.utils import configclass
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
 import rl_training.tasks.manager_based.locomotion.velocity.mdp as mdp
+from rl_training.depth import D435I, M20_D435I_MOUNT, CameraMount, D435iSpec
 from rl_training.tasks.manager_based.locomotion.velocity.config.wheeled.deeprobotics_m20.rough_env_cfg import (
     DeeproboticsM20RoughEnvCfg,
 )
@@ -710,6 +712,8 @@ class DeeproboticsM20StairsSightedV3bEnvCfg_PLAY(DeeproboticsM20StairsSightedV3b
 # Student (Milestone B, sequential distillation from a frozen teacher; 2026-09-24)
 ##
 
+# V0 placeholder camera (used by `add_depth_camera`, i.e. the first student run only). The current
+# student uses `add_d435i_camera`, configured from `rl_training.depth` (D435I spec + M20 mount).
 # Depth camera placeholder -- REPLACE with the real mount once the sensor is chosen (command.md
 # Phase 5, [ASK HUMAN]). Front of the body, pitched down so the image covers ~0.2-2.6 m of ground
 # ahead from the M20's standing height. Intrinsics approximate an Intel RealSense D435 depth stream
@@ -778,6 +782,69 @@ def add_depth_camera(env_cfg, noisy: bool = True) -> None:
     env_cfg.observations.depth.enable_corruption = noisy
 
 
+def add_d435i_camera(
+    env_cfg, spec: D435iSpec = D435I, mount: CameraMount = M20_D435I_MOUNT, noisy: bool = True
+) -> None:
+    """Add a RealSense D435i (`scene.depth_camera`), its `depth` observation group and mount jitter.
+
+    The ray caster casts directly at the policy resolution (one ray per output pixel, the robot
+    median-pools 848x480 down to the same grid; see docs/depth_pipeline.md). `depth` is
+    (N, 1, spec.height, spec.width) in [0, 1] from `mdp.d435i_depth_image`. With `noisy=False` the
+    random noise, latency, frame drops and mount jitter are off; stereo occlusion (geometry) stays on.
+    Call after `super().__post_init__()` so sim.dt / decimation are final.
+    """
+    aperture = 20.955  # mm; only the focal/aperture ratio matters for a ray-cast pinhole
+    env_cfg.scene.depth_camera = RayCasterCameraCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/" + env_cfg.base_link_name,
+        mesh_prim_paths=["/World/ground"],
+        update_period=1.0 / spec.fps,
+        offset=RayCasterCameraCfg.OffsetCfg(
+            pos=mount.pos, rot=_pitch_down_quat(mount.pitch_down_deg), convention="world"
+        ),
+        data_types=["distance_to_image_plane"],
+        depth_clipping_behavior="max",
+        max_distance=spec.far_m,
+        pattern_cfg=patterns.PinholeCameraPatternCfg(
+            focal_length=aperture * spec.focal_px(spec.width) / spec.width,
+            horizontal_aperture=aperture,
+            width=spec.width,
+            height=spec.height,
+        ),
+        debug_vis=False,
+    )
+
+    step_dt = env_cfg.sim.dt * env_cfg.decimation
+    latency_steps = tuple(int(round(t / step_dt)) for t in spec.latency_s)
+    env_cfg.observations.depth = ObsGroup()
+    env_cfg.observations.depth.depth_image = ObsTerm(
+        func=mdp.d435i_depth_image,
+        params={
+            "sensor_cfg": SceneEntityCfg("depth_camera"),
+            "out_hw": (spec.height, spec.width),
+            "near": spec.min_z_m,
+            "far": spec.far_m,
+            "min_valid_frac": spec.min_valid_frac,
+            "baseline_m": spec.baseline_m,
+            "native_focal_px": spec.native_focal_px,
+            "sim_focal_px": spec.focal_px(spec.width),
+            "group_name": "depth",
+            "latency_steps_range": latency_steps,
+        },
+    )
+    env_cfg.observations.depth.concatenate_terms = True
+    env_cfg.observations.depth.enable_corruption = noisy
+
+    env_cfg.events.randomize_depth_camera_offset = (
+        EventTerm(
+            func=mdp.randomize_camera_offset,
+            mode="reset",
+            params={"sensor_cfg": SceneEntityCfg("depth_camera")},
+        )
+        if noisy
+        else None
+    )
+
+
 @configclass
 class DeeproboticsM20StairsStudentEnvCfg(DeeproboticsM20StairsSightedV3bEnvCfg):
     """Depth student env for sequential (DAgger-style) distillation from a frozen sighted teacher.
@@ -790,8 +857,9 @@ class DeeproboticsM20StairsStudentEnvCfg(DeeproboticsM20StairsSightedV3bEnvCfg):
       terms / order / scales -> 288 dims; identical to v2's), so the frozen PPO actor loads strictly
       and sees what it was trained on;
     - `policy`: the student's proprioception = v3b `policy` minus the height scan (keeps its noise);
-    - `depth`: (N, 1, 36, 64) depth image from a front ray-cast camera, with the noise model in
-      `mdp.depth_image` while `enable_corruption` is on;
+    - `depth`: (N, 1, 36, 64) RealSense D435i depth image (`add_d435i_camera`, `mdp.d435i_depth_image`,
+      shared preprocessing in `rl_training.depth`; see docs/depth_pipeline.md). Mount pose is still a
+      placeholder (`rl_training.depth.M20_D435I_MOUNT`);
     - `critic`: unchanged (unused by distillation).
 
     Distillation runner/model config is not defined here (see `docs/student_distillation_setup.md`).
@@ -800,7 +868,7 @@ class DeeproboticsM20StairsStudentEnvCfg(DeeproboticsM20StairsSightedV3bEnvCfg):
     def __post_init__(self):
         super().__post_init__()
 
-        add_depth_camera(self)
+        add_d435i_camera(self)
 
         # ------------------------------ Observation groups ------------------------------
         teacher = copy.deepcopy(self.observations.policy)
@@ -822,6 +890,7 @@ class DeeproboticsM20StairsStudentEnvCfg_PLAY(DeeproboticsM20StairsStudentEnvCfg
         self.observations.policy.enable_corruption = False
         self.observations.depth.enable_corruption = False
         self.events.randomize_push_robot = None
+        self.events.randomize_depth_camera_offset = None
 
         if self.scene.terrain.terrain_generator is not None:
             self.scene.terrain.terrain_generator.num_rows = 5
@@ -837,3 +906,16 @@ class DeeproboticsM20StairsStudentEnvCfg_PLAY(DeeproboticsM20StairsStudentEnvCfg
         self.commands.base_velocity.rel_only_lin_x_envs = 0.0
         self.commands.base_velocity.rel_only_lin_y_envs = 0.0
         self.commands.base_velocity.rel_only_ang_z_envs = 0.0
+
+
+@configclass
+class DeeproboticsM20StairsStudentV0EnvCfg(DeeproboticsM20StairsStudentEnvCfg):
+    """First student run's env (2026-09-28): the placeholder camera + `mdp.depth_image` noise model.
+
+    Kept only so checkpoints trained before the D435i module can be evaluated on what they saw.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        add_depth_camera(self)
+        self.events.randomize_depth_camera_offset = None

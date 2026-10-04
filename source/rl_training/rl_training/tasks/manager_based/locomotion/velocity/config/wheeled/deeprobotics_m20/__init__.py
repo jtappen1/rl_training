@@ -231,6 +231,17 @@ gym.register(
 )
 
 gym.register(
+    id="Stairs-Student-V0-Deeprobotics-M20-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        # First student run (placeholder camera, pre-D435i module); for evaluating its checkpoints.
+        "env_cfg_entry_point": f"{__name__}.stairs_env_cfg:DeeproboticsM20StairsStudentV0EnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_distillation_cfg:DeeproboticsM20StairsStudentRunnerCfg",
+    },
+)
+
+gym.register(
     id="Stairs-Student-Deeprobotics-M20-Play-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,

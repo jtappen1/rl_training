@@ -39,7 +39,7 @@ import cli_args  # noqa: E402
 parser = argparse.ArgumentParser(description="Multi-terrain straight-line course eval for an M20 checkpoint.")
 parser.add_argument(
     "--clean_depth", action="store_true",
-    help="Depth-student tasks: turn off the depth noise / latency / frame drops (default: as trained).",
+    help="Depth-student tasks: turn off the depth noise / latency / mount jitter (default: as trained).",
 )
 parser.add_argument("--checkpoint", type=str, required=True, help="model_*.pt, or a run dir (latest checkpoint used).")
 parser.add_argument("--task", type=str, default="Stairs-Sighted-V2-Deeprobotics-M20-v0")
@@ -166,6 +166,8 @@ def build_env_cfg(course_len: float, time_budget: float):
     env_cfg.observations.policy.enable_corruption = False
     if args_cli.clean_depth and hasattr(env_cfg.observations, "depth"):
         env_cfg.observations.depth.enable_corruption = False
+        if hasattr(env_cfg.events, "randomize_depth_camera_offset"):
+            env_cfg.events.randomize_depth_camera_offset = None
 
     env_cfg.viewer.origin_type = "asset_root"
     env_cfg.viewer.asset_name = "robot"
