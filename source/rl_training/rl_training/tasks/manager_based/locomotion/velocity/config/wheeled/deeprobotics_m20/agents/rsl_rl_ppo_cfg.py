@@ -12,8 +12,12 @@ from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, R
 class DeeproboticsM20RoughPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
     max_iterations = 20000
-    save_interval = 100
+    save_interval = 500
     experiment_name = "deeprobotics_m20_rough"
+    # W&B by default (run `wandb login` once; `--logger tensorboard` still works per run).
+    # TensorBoard event files are written to the run directory either way.
+    logger = "wandb"
+    wandb_project = "deeprobotics_m20"
     empirical_normalization = False
     clip_actions = 100
     policy = RslRlPpoActorCriticCfg(
@@ -46,3 +50,12 @@ class DeeproboticsM20FlatPPORunnerCfg(DeeproboticsM20RoughPPORunnerCfg):
 
         self.max_iterations = 5000
         self.experiment_name = "deeprobotics_m20_flat"
+
+
+@configclass
+class DeeproboticsM20DR1PPORunnerCfg(DeeproboticsM20RoughPPORunnerCfg):
+    """Vendor PPO settings unchanged; separate log directory for DR1 runs."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.experiment_name = "deeprobotics_m20_dr1"

@@ -8,7 +8,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.actuators import DCMotorCfg, DelayedPDActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
 
-from rl_training.actuator import RandomPDActuatorCfg
+from rl_training.actuator import FrictionDelayedPDActuatorCfg, RandomPDActuatorCfg
 from rl_training.assets import ISAACLAB_ASSETS_DATA_DIR
 
 DEEPROBOTICS_LITE3_CFG = ArticulationCfg(
@@ -116,6 +116,38 @@ DEEPROBOTICS_M20_CFG = ArticulationCfg(
             armature=0.00243216,
             min_delay=0,
             max_delay=1,
+        ),
+    },
+)
+
+
+# M20 with DR1 actuators (docs/plans/M20_Domain_Randomization_DR1.md): same PD gains and limits as
+# DEEPROBOTICS_M20_CFG, plus drive friction drawn per env at reset and a 1-3 physics-step (5-15 ms) delay.
+DEEPROBOTICS_M20_DR1_CFG = DEEPROBOTICS_M20_CFG.replace(
+    actuators={
+        "joint": FrictionDelayedPDActuatorCfg(
+            joint_names_expr=[".*hipx_joint", ".*hipy_joint", ".*knee_joint"],
+            effort_limit=76.4,  # knee limit deliberately unchanged
+            velocity_limit=22.4,
+            stiffness=80.0,
+            damping=2.0,
+            friction=0.0,
+            armature=0.0,
+            min_delay=1,
+            max_delay=3,
+            drive_friction_range=(0.0, 0.5),  # proposed; legs not measured
+        ),
+        "wheel": FrictionDelayedPDActuatorCfg(
+            joint_names_expr=[".*_wheel_joint"],
+            effort_limit=21.6,
+            velocity_limit=79.3,
+            stiffness=0.0,
+            damping=0.6,
+            friction=0.0,
+            armature=0.00243216,
+            min_delay=1,
+            max_delay=3,
+            drive_friction_range=(0.0, 3.0),  # >= 2.3 N*m measured on FL (bag s2r_082342)
         ),
     },
 )

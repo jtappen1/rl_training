@@ -10,9 +10,14 @@ Usage:
 
 Each path should be a run directory (e.g. logs/rsl_rl/deeprobotics_lite3_rough/2025-01-01_12-00-00)
 containing params/agent.yaml and params/env.yaml, or the yaml files directly.
+
+If both runs have M20 evaluation results (<run>/eval/*.json, written by scripts/eval/m20_eval.py), the
+metric differences are printed after the config differences, per pass (latest result file of each run).
 """
 
 import argparse
+import json
+import sys
 from pathlib import Path
 
 import yaml
@@ -119,6 +124,53 @@ def _find_yaml(run_dir: Path, filename: str) -> Path:
     )
 
 
+def _latest_eval(run_dir: Path) -> dict[str, Path]:
+    """Newest result file per pass in <run>/eval (comparison tables and chunk parts excluded)."""
+    found: dict[str, Path] = {}
+    for f in sorted((run_dir / "eval").glob("*.json"), key=lambda f: f.stat().st_mtime):
+        if ".part" in f.name:
+            continue
+        try:
+            with open(f) as fh:
+                ps = json.load(fh)["meta"]["pass"]
+        except (OSError, KeyError, ValueError):
+            continue
+        found[ps] = f
+    return found
+
+
+def _print_eval_diff(run1: Path, run2: Path, name1: str, name2: str) -> None:
+    ev1, ev2 = _latest_eval(run1), _latest_eval(run2)
+    passes = [p for p in ("randomized", "nominal") if p in ev1 and p in ev2]
+    if not passes:
+        return
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "eval"))
+    from m20eval import compare as C
+    from m20eval import results as R
+
+    for ps in passes:
+        print(f"\n{'='*70}")
+        print(f" eval metrics, {ps} pass: {ev1[ps].name} vs {ev2[ps].name}")
+        print(f"{'='*70}")
+        s1, s2 = R.load(ev1[ps])["scored"], R.load(ev2[ps])["scored"]
+        rows = []
+        for k in sorted(set(s1) | set(s2)):
+            st, d = C.status(s2.get(k), s1.get(k), C.DEFAULT_REL_TOL)
+            if st in ("better", "worse") or k not in s1 or k not in s2:
+                v1 = f"{s1[k]['value']:.4g}" if k in s1 else "-"
+                v2 = f"{s2[k]['value']:.4g}" if k in s2 else "-"
+                rows.append((k, v1, v2, st if k in s1 and k in s2 else "missing"))
+        if not rows:
+            print("  [no differences beyond tolerance]")
+            continue
+        key_w = max(len(r[0]) for r in rows)
+        col_w = max(len(name1), len(name2), 8)
+        print(f"    {'metric':<{key_w}}  {name1:<{col_w}}  {name2:<{col_w}}  {name2} vs {name1}")
+        print(f"    {'-'*key_w}  {'-'*col_w}  {'-'*col_w}  {'-'*10}")
+        for k, v1, v2, st in rows:
+            print(f"    {k:<{key_w}}  {v1:<{col_w}}  {v2:<{col_w}}  {st}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Compare two training run configs.")
     parser.add_argument("run1", help="Path to first run directory")
@@ -144,6 +196,7 @@ def main():
         flat2 = _flatten(_load_yaml(path2))
         _print_diff(flat1, flat2, name1, name2)
 
+    _print_eval_diff(run1, run2, name1, name2)
     print()
 
 
