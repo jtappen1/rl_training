@@ -25,17 +25,45 @@ if TYPE_CHECKING:
 
 
 def terrain_levels_vel(
-    env: ManagerBasedRLEnv, env_ids: Sequence[int], asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+    env: ManagerBasedRLEnv,
+    env_ids: Sequence[int],
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    use_path_length: bool = False,
+    up_ratio: float = 0.8,
+    down_ratio: float = 0.5,
+    min_cmd_path_m: float = 2.0,
 ) -> torch.Tensor:
-    """Terrain curriculum with synchronized global gait_level update."""
+    """Terrain curriculum with synchronized global gait_level update.
+
+    Default (vendor): promote if the robot ends more than half a tile from its start, demote if that
+    straight-line distance is below half of |final command| * episode length.
+
+    ``use_path_length=True`` (for curved commands, e.g. constant yaw rates, where a robot that tracks
+    perfectly drives in circles and never gets far from its start): compare the distance actually driven
+    with the distance commanded, both integrated over the episode by the base_velocity command term
+    (``path_length`` / ``cmd_path_length`` metrics). Promote if driven > up_ratio * commanded and driven > half
+    a tile; demote if driven < down_ratio * commanded or the episode ended in a termination (not a time-out).
+    Envs commanded less than ``min_cmd_path_m`` (standing) are only demoted on termination.
+    """
     asset: Articulation = env.scene[asset_cfg.name]
     terrain: TerrainImporter = env.scene.terrain
-    command = env.command_manager.get_command("base_velocity")
+    half_tile = terrain.cfg.terrain_generator.size[0] / 2
 
-    distance = torch.norm(asset.data.root_pos_w[env_ids, :2] - env.scene.env_origins[env_ids, :2], dim=1)
-    move_up = distance > terrain.cfg.terrain_generator.size[0] / 2
-    move_down = distance < torch.norm(command[env_ids, :2], dim=1) * env.max_episode_length_s * 0.5
-    move_down *= ~move_up
+    if use_path_length:
+        metrics = env.command_manager.get_term("base_velocity").metrics
+        driven = metrics["path_length"][env_ids]
+        commanded = metrics["cmd_path_length"][env_ids]
+        died = env.termination_manager.terminated[env_ids]
+        moving = commanded > min_cmd_path_m
+        move_up = moving & ~died & (driven > up_ratio * commanded) & (driven > half_tile)
+        move_down = (moving & (driven < down_ratio * commanded)) | died
+        move_down &= ~move_up
+    else:
+        command = env.command_manager.get_command("base_velocity")
+        distance = torch.norm(asset.data.root_pos_w[env_ids, :2] - env.scene.env_origins[env_ids, :2], dim=1)
+        move_up = distance > half_tile
+        move_down = distance < torch.norm(command[env_ids, :2], dim=1) * env.max_episode_length_s * 0.5
+        move_down *= ~move_up
 
     terrain.update_env_origins(env_ids, move_up, move_down)
 

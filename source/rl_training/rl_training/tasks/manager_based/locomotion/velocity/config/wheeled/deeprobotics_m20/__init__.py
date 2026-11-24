@@ -56,6 +56,17 @@ gym.register(
     },
 )
 
+# Turn0: Cmd1 without the scripted turn-in-place gait; wheel side-slip + energy penalties instead.
+gym.register(
+    id="Rough-Deeprobotics-M20-Turn0-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.turn0_env_cfg:DeeproboticsM20Turn0EnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:DeeproboticsM20Turn0PPORunnerCfg",
+    },
+)
+
 # Evaluation tasks (docs/plans/M20_Evaluation_Suite.md). scripts/eval/m20_eval.py builds its config from
 # any M20 rough task instead; these ids are for running the eval config directly (e.g. with play.py).
 gym.register(

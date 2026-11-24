@@ -781,6 +781,34 @@ def feet_slide(
     # reward *= torch.clamp(-env.scene["robot"].data.projected_gravity_b[:, 2], 0, 0.7) / 0.7
     return reward
 
+def wheel_lateral_slip(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    axle_axis: tuple[float, float, float] = (0.0, 1.0, 0.0),
+    scale_by_gait_level: bool = True,
+) -> torch.Tensor:
+    """Penalize wheels sliding sideways (along their axle) while in contact. Sum of |slip| in m/s.
+
+    Rolling moves the contact point only within the wheel plane, so the velocity component along the axle is
+    the real side slip (skid-steer turning, lateral scrubbing). Unlike ``feet_slide``, rolling and lifting a
+    wheel are not penalized. ``axle_axis`` is the axle in the wheel body frame (M20: local y).
+    """
+    contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    asset: Articulation = env.scene[asset_cfg.name]
+    contacts = contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).max(dim=1)[0] > 1.0
+
+    quat = asset.data.body_quat_w[:, asset_cfg.body_ids]  # (N, B, 4)
+    axle_b = torch.tensor(axle_axis, device=env.device, dtype=quat.dtype).expand(quat.shape[:-1] + (3,))
+    axle_w = math_utils.quat_apply(quat.reshape(-1, 4), axle_b.reshape(-1, 3)).reshape(axle_b.shape)
+    vel = asset.data.body_lin_vel_w[:, asset_cfg.body_ids]  # wheel centre velocity (N, B, 3)
+    slip = torch.abs(torch.sum(vel * axle_w, dim=-1))
+    reward = torch.sum(slip * contacts, dim=1)
+    if scale_by_gait_level:
+        reward = reward * get_gait_level_tensor(env)
+    return reward
+
+
 def feet_slide_ang_z_cmd(
     env: ManagerBasedRLEnv,
     command_name: str,
@@ -1205,8 +1233,13 @@ def feet_air_time_ang_z_cmd_M20(
     cmd_threshold: float = 0.1,
     foot_height_threshold: float = 0.05,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    lin_cmd_max: float | None = None,
 ) -> torch.Tensor:
-    """Air-time reward gated by yaw command and minimum foot clearance."""
+    """Air-time reward gated by yaw command and minimum foot clearance.
+
+    If ``lin_cmd_max`` is set, the reward is also gated to ||cmd_xy|| < lin_cmd_max (turning in place), so
+    arcs driven with a yaw-rate command are not rewarded for stepping. Default None = vendor behaviour.
+    """
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
     asset: RigidObject = env.scene[asset_cfg.name]
 
@@ -1233,8 +1266,10 @@ def feet_air_time_ang_z_cmd_M20(
     state["ground_height"] = torch.where(in_contact, foot_height, ground_height)
     state["max_air_height"] = torch.where(in_contact, foot_height, max_air_height)
 
-    cmd_ang_z = torch.abs(env.command_manager.get_command(command_name)[:, 2])
-    reward *= cmd_ang_z > cmd_threshold
+    command = env.command_manager.get_command(command_name)
+    reward *= torch.abs(command[:, 2]) > cmd_threshold
+    if lin_cmd_max is not None:
+        reward *= torch.linalg.norm(command[:, :2], dim=1) < lin_cmd_max
     return reward * get_gait_level_tensor(env)
 
 def feet_air_time_including_ang_z(

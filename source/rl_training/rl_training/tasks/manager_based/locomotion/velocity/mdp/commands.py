@@ -34,6 +34,9 @@ class UniformThresholdVelocityCommand(mdp.UniformVelocityCommand):
         # Additional metrics for TensorBoard.
         self.metrics["base_z"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["knee_pos"] = torch.zeros(self.num_envs, device=self.device)
+        # distance driven / commanded over the episode (m), used by terrain_levels_vel(use_path_length=True)
+        self.metrics["path_length"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["cmd_path_length"] = torch.zeros(self.num_envs, device=self.device)
         self._metric_step_counter = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
 
         knee_joint_ids = self.robot.find_joints(".*[Kk]nee.*")[0]
@@ -88,6 +91,10 @@ class UniformThresholdVelocityCommand(mdp.UniformVelocityCommand):
             running_reward,
             5.0 * running_reward,
         )
+
+        dt = self._env.step_dt
+        self.metrics["path_length"] += body_vel * dt
+        self.metrics["cmd_path_length"] += torch.linalg.norm(self.vel_command_b[:, :2], dim=1) * dt
 
         self.metrics["base_z"] += base_z
         self.metrics["knee_pos"] += knee_pos
