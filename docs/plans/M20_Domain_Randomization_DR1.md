@@ -13,7 +13,7 @@ DR1 adds the terms the real robot needs and widens ranges only where a measureme
 
 | Change | Range | Implementation | Source |
 | --- | --- | --- | --- |
-| Wheel drive friction | 0–3 N·m wheels, 0–0.5 N·m legs (proposed) | Custom actuator subclassing `DelayedPDActuator`: subtract τc · tanh(q̇ / 0.1) after PD; draw τc per env at reset | ≥ 2.3 N·m measured on FL; 0 in training |
+| Wheel drive friction (**off for now**: ranges set to 0 until the friction model is confirmed) | 0–3 N·m wheels, 0–0.5 N·m legs (proposed) | Custom actuator subclassing `DelayedPDActuator`: subtract τc · tanh(q̇ / 0.1) after PD; draw τc per env at reset | ≥ 2.3 N·m measured on FL; 0 in training |
 | Latency | 1–3 physics steps (5–15 ms) | `min_delay=1`, `max_delay=3` in the same actuator; event repeats the previous action for one policy step with 2% probability | 10–12 ms, spikes to ~40 ms; 0–5 ms in training |
 | Observation noise | Halved: ang vel ±0.1, gravity ±0.025, joint vel ±0.75 | `Unoise` ranges in the policy obs group | Real noise 60–100× below training |
 | IMU bias | ±1° roll and pitch per env | Reset event draws the offset; custom `projected_gravity` obs rotates by it | +0.20° roll, +0.46° pitch standing |

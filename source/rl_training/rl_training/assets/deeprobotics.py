@@ -122,7 +122,9 @@ DEEPROBOTICS_M20_CFG = ArticulationCfg(
 
 
 # M20 with DR1 actuators (docs/plans/M20_Domain_Randomization_DR1.md): same PD gains and limits as
-# DEEPROBOTICS_M20_CFG, plus drive friction drawn per env at reset and a 1-3 physics-step (5-15 ms) delay.
+# DEEPROBOTICS_M20_CFG, plus a 1-3 physics-step (5-15 ms) delay.
+# Drive friction is currently OFF (ranges (0, 0)) until the friction model is confirmed. To re-enable, set
+# drive_friction_range to the values in the comments (wheels: >= 2.3 N*m measured on FL, bag s2r_082342).
 DEEPROBOTICS_M20_DR1_CFG = DEEPROBOTICS_M20_CFG.replace(
     actuators={
         "joint": FrictionDelayedPDActuatorCfg(
@@ -135,7 +137,7 @@ DEEPROBOTICS_M20_DR1_CFG = DEEPROBOTICS_M20_CFG.replace(
             armature=0.0,
             min_delay=1,
             max_delay=3,
-            drive_friction_range=(0.0, 0.5),  # proposed; legs not measured
+            drive_friction_range=(0.0, 0.0),  # off; was (0.0, 0.5), proposed, legs not measured
         ),
         "wheel": FrictionDelayedPDActuatorCfg(
             joint_names_expr=[".*_wheel_joint"],
@@ -147,7 +149,7 @@ DEEPROBOTICS_M20_DR1_CFG = DEEPROBOTICS_M20_CFG.replace(
             armature=0.00243216,
             min_delay=1,
             max_delay=3,
-            drive_friction_range=(0.0, 3.0),  # >= 2.3 N*m measured on FL (bag s2r_082342)
+            drive_friction_range=(0.0, 0.0),  # off; was (0.0, 3.0)
         ),
     },
 )

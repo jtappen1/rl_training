@@ -10,7 +10,7 @@ even though real sensor noise is far lower), knee torque limit (76.4 N*m).
 
 | Change                    | Range                                       | Where                                     |
 | ------------------------- | ------------------------------------------- | ----------------------------------------- |
-| Drive friction            | 0-3 N*m wheels, 0-0.5 N*m legs              | FrictionDelayedPDActuator (asset config)  |
+| Drive friction            | OFF for now (was 0-3 N*m wheels, 0-0.5 legs)| FrictionDelayedPDActuator (asset config)  |
 | Latency                   | 1-3 physics steps (5-15 ms)                 | same actuator: min_delay=1, max_delay=3   |
 | Dropped actions           | previous action held 1 policy step, 2 %     | events.action_repeat + repeatable actions |
 | IMU bias                  | +-1 deg roll and pitch per env              | events.imu_bias + biased gravity obs      |
@@ -48,7 +48,7 @@ class DeeproboticsM20DR1EnvCfg(DeeproboticsM20RoughEnvCfg):
     def __post_init__(self):
         super().__post_init__()
 
-        # ------------------------------Actuators: drive friction + 1-3 step delay------------------------------
+        # ------------------------------Actuators: 1-3 step delay (drive friction currently off)------------------------------
         self.scene.robot = DEEPROBOTICS_M20_DR1_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
         # ------------------------------Observations------------------------------
