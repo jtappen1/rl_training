@@ -166,15 +166,19 @@ class UniformThresholdVelocityCommand(mdp.UniformVelocityCommand):
             self.is_standing_env[ids_only_x] = False
             self.is_heading_env[ids_only_x] = False
 
-        # Apply only-ang_z: vx=0, vy=0, heading from full range
+        # Apply only-ang_z: vx=0, vy=0, heading from full range (or a direct yaw rate, see only_ang_z_heading)
         if len(ids_only_ang) > 0:
             r_h = torch.empty(len(ids_only_ang), device=self.device)
             self.vel_command_b[ids_only_ang, 0] = 0.0
             self.vel_command_b[ids_only_ang, 1] = 0.0
             self.is_standing_env[ids_only_ang] = False
-            self.is_heading_env[ids_only_ang] = True
-            if self.cfg.heading_command:
-                self.heading_target[ids_only_ang] = r_h.uniform_(*self.cfg.ranges.heading)
+            if self.cfg.only_ang_z_heading:
+                self.is_heading_env[ids_only_ang] = True
+                if self.cfg.heading_command:
+                    self.heading_target[ids_only_ang] = r_h.uniform_(*self.cfg.ranges.heading)
+            else:
+                self.is_heading_env[ids_only_ang] = False
+                self.vel_command_b[ids_only_ang, 2] = r_h.uniform_(*self._full_ranges_ang_vel_z)
 
 
 @configclass
@@ -210,6 +214,10 @@ class UniformThresholdVelocityCommandCfg(mdp.UniformVelocityCommandCfg):
     vx and vy are forced to zero; heading is sampled from the full range.
     Not affected by the command-level curriculum.
     """
+
+    only_ang_z_heading: bool = True
+    """If True, only-ang_z envs get a heading target (yaw rate from the heading controller); if False, they
+    get a constant yaw-rate command drawn from the full ang_vel_z range."""
 
 
 class DiscreteCommandController(CommandTerm):

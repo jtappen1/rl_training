@@ -59,3 +59,12 @@ class DeeproboticsM20DR1PPORunnerCfg(DeeproboticsM20RoughPPORunnerCfg):
     def __post_init__(self):
         super().__post_init__()
         self.experiment_name = "deeprobotics_m20_dr1"
+
+
+@configclass
+class DeeproboticsM20Cmd1PPORunnerCfg(DeeproboticsM20RoughPPORunnerCfg):
+    """Vendor PPO settings unchanged; separate log directory for Cmd1 runs."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.experiment_name = "deeprobotics_m20_cmd1"
